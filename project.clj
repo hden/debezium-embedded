@@ -4,5 +4,5 @@
   :license {:name "Apache License 2.0"
             :url "http://www.apache.org/licenses/LICENSE-2.0"}
   :dependencies [[org.clojure/clojure "1.11.1"]
-                 [io.debezium/debezium-embedded "1.9.2.Final"]]
+                 [io.debezium/debezium-embedded "1.9.3.Final"]]
   :repl-options {:init-ns debezium-embedded.core})

@@ -48,6 +48,46 @@ A Clojure wrapper for the Debezium embedded engine.
   (.execute thread-pool engine))
 ```
 
+## Record Structure
+
+Each record has the following structure:
+
+```clojure
+{:offset
+ {:last-snapshot-record false,  ; Whether this is the last snapshot record
+  :lsn 34360936,               ; PostgreSQL LSN (Log Sequence Number)
+  :tx-id 784,                  ; Transaction ID
+  :ts-usec 1743237554845451,   ; Timestamp in microseconds
+  :snapshot "INITIAL",         ; Snapshot state
+  :snapshot-completed false},  ; Snapshot completion flag
+ :value
+ {:before nil,                 ; Previous data (for updates/deletes)
+  :after                       ; New data (for inserts/updates)
+  {:id 1001,
+   :first-name "Sally",
+   :last-name "Thomas",
+   :email "sally.thomas@acme.com"},
+  :source                      ; Source information
+  {:connector "postgresql",
+   :schema "inventory",
+   :table "customers",
+   :db "postgres",
+   :name "test",
+   :ts-ms 1743237554845,      ; Timestamp in milliseconds
+   :ts-us 1743237554845451,   ; Timestamp in microseconds
+   :ts-ns 1743237554845451000, ; Timestamp in nanoseconds
+   :snapshot "first",
+   :sequence "[null,\"34360936\"]",
+   :tx-id 784,
+   :lsn 34360936,
+   :version "3.0.8.Final"},
+  :transaction nil,            ; Transaction information
+  :op "r",                     ; Operation type (r: read, c: create, u: update, d: delete)
+  :ts-ms 1743237554961,       ; Event timestamp in milliseconds
+  :ts-us 1743237554961805,    ; Event timestamp in microseconds
+  :ts-ns 1743237554961805000}} ; Event timestamp in nanoseconds
+```
+
 ## Development
 
 ### Running Tests

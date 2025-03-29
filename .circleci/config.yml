@@ -3,6 +3,11 @@ jobs:
   build:
     docker:
       - image: cimg/clojure:1.11
+      - image: debezium/example-postgres:3.0.0.Final
+        environment:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
     working_directory: ~/repo
     environment:
       LEIN_ROOT: "true"

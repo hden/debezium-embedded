@@ -1,0 +1,9 @@
+services:
+  postgres:
+    image: debezium/example-postgres:3.0.0.Final
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres

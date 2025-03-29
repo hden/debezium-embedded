@@ -17,6 +17,9 @@ pom.xml.asc
 .lein-failures
 .nrepl-port
 .cpcache/
+.clj-kondo/.cache/
+.lsp/
+.java-version
 
 ### macOS ###
 # General

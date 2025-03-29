@@ -1,41 +1,36 @@
 (ns debezium-embedded.core
-  (:import [io.debezium.config Configuration]
-           [io.debezium.embedded.spi OffsetCommitPolicy]
-           [io.debezium.embedded EmbeddedEngine
-                                 EmbeddedEngine$ChangeConsumer
-                                 EmbeddedEngine$CompletionCallback
-                                 EmbeddedEngine$ConnectorCallback]))
+  (:import (java.util Properties)
+           (io.debezium.embedded EmbeddedEngine$EngineBuilder)
+           (io.debezium.engine DebeziumEngine$ChangeConsumer
+                               DebeziumEngine$CompletionCallback
+                               DebeziumEngine$ConnectorCallback)))
 
-(defn create-configuration [m]
-  (Configuration/from m))
+(defn- map->properties [m]
+  (let [props (new Properties)]
+    (doseq [[k v] m]
+      (.setProperty props (name k) (str v)))
+    props))
 
-(defn create-always-offset-commit-policy []
-  (OffsetCommitPolicy/always))
-
-(defn create-periodic-offset-commit-policy [x]
-  (let [config (create-configuration {"offset.flush.interval.ms" (str x)})]
-    (OffsetCommitPolicy/periodic config)))
-
-(defn create-batch-consumer [f]
-  (reify EmbeddedEngine$ChangeConsumer
+(defn- create-batch-consumer [f]
+  (reify DebeziumEngine$ChangeConsumer
     (handleBatch [_ records committer]
-      (f records committer)
+      (f (into [] records))
+      ;; mark all records as processed
+      (doseq [record records]
+        (.markProcessed committer record))
       (.markBatchFinished committer))))
 
-(defn mark-processed! [committer record]
-  (.markProcessed committer record))
-
-(defn create-completion-callback
+(defn- create-completion-callback
   "Handle the completion of the embedded connector engine."
   [f]
-  (reify EmbeddedEngine$CompletionCallback
+  (reify DebeziumEngine$CompletionCallback
     (handle [_ _ message error]
       (f error message))))
 
-(defn create-connector-callback
+(defn- create-connector-callback
   "Callback function which informs users about the various stages a connector goes through during startup."
   [f]
-  (reify EmbeddedEngine$ConnectorCallback
+  (reify DebeziumEngine$ConnectorCallback
     (connectorStarted [_]
       (f ::connector-started))
     (connectorStopped [_]
@@ -45,14 +40,16 @@
     (taskStopped [_]
       (f ::task-stopped))))
 
-(defn create-engine [{:keys [config consumer] :as options}]
-  (let [builder (EmbeddedEngine/create)]
+(defn create-engine [{:keys [config consumer]
+                      :as options}]
+  (let [builder (new EmbeddedEngine$EngineBuilder)]
     ;; Setting required parameters.
     (doto builder
-      (.using (create-configuration config))
-      (.notifying consumer))
-    ;; Setting optional parameters.
-    (doseq [key [:completion-callback :connector-callback :offset-commit-policy]]
-      (when-let [callback (get options key)]
-        (.using builder callback)))
+      (.using (map->properties config))
+      (.notifying (create-batch-consumer consumer)))
+    ;; Setting callbacks.
+    (when-let [callback (get options :completion-callback)]
+      (.using builder (create-completion-callback callback)))
+    (when-let [callback (get options :connector-callback)]
+      (.using builder (create-connector-callback callback)))
     (.build builder)))

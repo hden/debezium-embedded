@@ -8,5 +8,5 @@
                  [io.debezium/debezium-embedded "3.1.0.Final"]]
   :profiles {:dev {:dependencies [[funcool/promesa "11.0.678"]
                                   ;; [org.slf4j/slf4j-simple "2.0.17"]
-                                  [io.debezium/debezium-connector-postgres "3.0.8.Final"]]}}
+                                  [io.debezium/debezium-connector-postgres "3.1.0.Final"]]}}
   :repl-options {:init-ns debezium-embedded.core})

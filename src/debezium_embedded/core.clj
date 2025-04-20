@@ -1,7 +1,8 @@
 (ns debezium-embedded.core
   (:require [camel-snake-kebab.core :as csk])
   (:import (java.util Properties)
-           (io.debezium.embedded EmbeddedEngine$EngineBuilder)
+           (io.debezium.embedded EmbeddedEngine
+                                 EmbeddedEngine$EngineBuilder)
            (io.debezium.engine DebeziumEngine$ChangeConsumer
                                DebeziumEngine$CompletionCallback
                                DebeziumEngine$ConnectorCallback)
@@ -76,3 +77,6 @@
     (when-let [callback (get arg-map :connector-callback)]
       (.using builder (create-connector-callback callback)))
     (.build builder)))
+
+(defn running? [^EmbeddedEngine engine]
+  (.isRunning engine))

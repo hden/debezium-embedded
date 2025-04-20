@@ -1,6 +1,6 @@
 (ns debezium-embedded.core-test
   (:require [clojure.test :refer [deftest is testing]]
-            [debezium-embedded.core :refer [create-engine]]
+            [debezium-embedded.core :refer [running? create-engine]]
             [promesa.core :as promesa])
   (:import (java.util.concurrent Executors)))
 
@@ -36,5 +36,6 @@
         (is (not (nil? engine)))
         (.execute thread-pool engine)
         (let [resolved-events (promesa/await events 2000)]
+          (is (running? engine))
           (is (vector? resolved-events))
           (is (seq resolved-events)))))))

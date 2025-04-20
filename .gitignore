@@ -50,3 +50,4 @@ Temporary Items
 .apdisk
 
 # End of https://www.gitignore.io/api/macos,clojure
+.clj-kondo/

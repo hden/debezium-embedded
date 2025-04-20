@@ -7,13 +7,13 @@ A Clojure wrapper for the Debezium embedded engine.
 ## Installation
 
 ```clojure
-[hden/debezium-embedded "3.0.8-SNAPSHOT"]
+[hden/debezium-embedded "3.1.0-SNAPSHOT"]
 ```
 
 ## Dependencies
 
 - Clojure 1.12.0 or higher
-- Debezium Embedded 3.0.8.Final
+- Debezium Embedded 3.1.0.Final
 - PostgreSQL connector (if using PostgreSQL)
 
 ## Usage

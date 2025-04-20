@@ -7,10 +7,10 @@
                                DebeziumEngine$CompletionCallback
                                DebeziumEngine$ConnectorCallback)
            (org.apache.kafka.connect.source SourceRecord)
-           (org.apache.kafka.connect.data Struct)))
+           (org.apache.kafka.connect.data Struct Field)))
 
 (defn- map->properties [m]
-  (let [props (new Properties)]
+  (let [props (Properties.)]
     (doseq [[k v] m]
       (.setProperty props (name k) (str v)))
     props))
@@ -18,7 +18,7 @@
 (defn- struct->map [^Struct struct]
   (when struct
     (into {}
-          (map (fn [field]
+          (map (fn [^Field field]
                  (let [field-name (.name field)]
                    [(csk/->kebab-case-keyword field-name)
                     (let [value (.get struct field-name)]
@@ -64,19 +64,39 @@
   {:offset.storage "org.apache.kafka.connect.storage.MemoryOffsetBackingStore"
    :offset.flush.interval.ms "0"})
 
-(defn create-engine [{:keys [config consumer]
-                      :as arg-map}]
-  (let [builder (new EmbeddedEngine$EngineBuilder)]
+(defn create-engine
+  "Creates a new Debezium embedded engine instance.
+  
+  Arguments:
+  - arg-map: A map containing the following keys:
+    * :config - Configuration map for the Debezium engine
+    * :consumer - Function to handle change events
+    * :completion-callback - Optional callback for engine completion
+    * :connector-callback - Optional callback for connector lifecycle events
+  
+  Returns:
+  An instance of EmbeddedEngine ready to be started."
+  [{:keys [config consumer]
+    :as arg-map}]
+  (let [^EmbeddedEngine$EngineBuilder builder (EmbeddedEngine$EngineBuilder.)]
     ;; Setting required parameters.
     (doto builder
-      (.using (map->properties (merge default-config config)))
-      (.notifying (create-batch-consumer consumer)))
+      (.using ^Properties (map->properties (merge default-config config)))
+      (.notifying ^DebeziumEngine$ChangeConsumer (create-batch-consumer consumer)))
     ;; Setting callbacks.
     (when-let [callback (get arg-map :completion-callback)]
-      (.using builder (create-completion-callback callback)))
+      (.using builder ^DebeziumEngine$CompletionCallback (create-completion-callback callback)))
     (when-let [callback (get arg-map :connector-callback)]
-      (.using builder (create-connector-callback callback)))
+      (.using builder ^DebeziumEngine$ConnectorCallback (create-connector-callback callback)))
     (.build builder)))
 
-(defn running? [^EmbeddedEngine engine]
+(defn running?
+  "Checks if the given Debezium engine is currently running.
+  
+  Arguments:
+  - engine: An instance of EmbeddedEngine
+  
+  Returns:
+  true if the engine is running, false otherwise."
+  [^EmbeddedEngine engine]
   (.isRunning engine))

@@ -2,7 +2,8 @@
   (:require [clojure.test :refer [deftest is testing]]
             [debezium-embedded.core :refer [running? create-engine]]
             [promesa.core :as promesa])
-  (:import (java.util.concurrent Executors)))
+  (:import (java.util.concurrent Executors ExecutorService)
+           (io.debezium.embedded EmbeddedEngine)))
 
 (deftest factories
   (testing "create-engine"
@@ -11,7 +12,7 @@
       (is (create-engine {:config config
                           :consumer consumer})))))
 
-(def ^:private thread-pool (Executors/newFixedThreadPool 1))
+(def ^:private ^ExecutorService thread-pool (Executors/newFixedThreadPool 1))
 
 (deftest ^:integration postgres
   (testing "engine"
@@ -31,11 +32,11 @@
           events (promesa/deferred)
           consumer (fn [records]
                      (promesa/resolve! events records))]
-      (with-open [engine (create-engine {:config config
-                                   :consumer consumer})]
-        (is (not (nil? engine)))
-        (.execute thread-pool engine)
-        (let [resolved-events (promesa/await events 2000)]
-          (is (running? engine))
-          (is (vector? resolved-events))
-          (is (seq resolved-events)))))))
+     (with-open [^EmbeddedEngine engine (create-engine {:config config
+                                                       :consumer consumer})]
+       (is (not (nil? engine)))
+       (.execute thread-pool engine)
+       (let [resolved-events (promesa/await events 2000)]
+         (is (running? engine))
+         (is (vector? resolved-events))
+         (is (seq resolved-events)))))))

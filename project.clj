@@ -3,7 +3,7 @@
   :url "https://github.com/hden/debezium-embedded"
   :license {:name "Apache License 2.0"
             :url "http://www.apache.org/licenses/LICENSE-2.0"}
-  :dependencies [[org.clojure/clojure "1.12.3"]
+  :dependencies [[org.clojure/clojure "1.12.5"]
                  [camel-snake-kebab "0.4.3"]
                  [io.debezium/debezium-embedded "3.1.3.Final"]]
   :profiles {:dev {:global-vars {*warn-on-reflection* true}

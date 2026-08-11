@@ -13,6 +13,140 @@
         [::lifecycle/connector-started
          ::lifecycle/polling-started]))
 
+(deftest literal-traces-project-to-normal-phases
+  (doseq [{:keys [trace expected-phase]}
+          [{:trace          []
+            :expected-phase ::lifecycle/ready}
+           {:trace          [::lifecycle/start-requested]
+            :expected-phase ::lifecycle/starting}
+           {:trace          [::lifecycle/start-requested
+                             ::lifecycle/engine-submission-started
+                             ::lifecycle/engine-invocation-started
+                             ::lifecycle/connector-started
+                             ::lifecycle/polling-started]
+            :expected-phase ::lifecycle/capturing}
+           {:trace          [::lifecycle/start-requested
+                             ::lifecycle/engine-submission-started
+                             ::lifecycle/engine-invocation-started
+                             ::lifecycle/connector-started
+                             ::lifecycle/polling-started
+                             ::lifecycle/stop-requested]
+            :expected-phase ::lifecycle/stopping}
+           {:trace          [::lifecycle/start-requested
+                             ::lifecycle/engine-submission-started
+                             ::lifecycle/engine-invocation-started
+                             ::lifecycle/connector-started
+                             ::lifecycle/polling-started
+                             ::lifecycle/stop-requested
+                             ::lifecycle/polling-stopped
+                             ::lifecycle/connector-stopped
+                             ::lifecycle/completion-observed]
+            :expected-phase ::lifecycle/stopped}]]
+    (is (= expected-phase (lifecycle/phase trace)))))
+
+(deftest invalid-callbacks-retain-the-raw-fact-and-derive-one-protocol-anomaly
+  (doseq [{:keys [prefix observation]}
+          [{:prefix      [::lifecycle/start-requested
+                          ::lifecycle/engine-submission-started
+                          ::lifecycle/engine-invocation-started
+                          ::lifecycle/connector-started]
+            :observation ::lifecycle/connector-started}
+           {:prefix      [::lifecycle/start-requested
+                          ::lifecycle/engine-submission-started
+                          ::lifecycle/engine-invocation-started
+                          ::lifecycle/connector-started
+                          ::lifecycle/polling-started]
+            :observation ::lifecycle/polling-started}
+           {:prefix      [::lifecycle/start-requested
+                          ::lifecycle/engine-submission-started
+                          ::lifecycle/engine-invocation-started]
+            :observation ::lifecycle/connector-stopped}
+           {:prefix      [::lifecycle/start-requested
+                          ::lifecycle/engine-submission-started
+                          ::lifecycle/engine-invocation-started]
+            :observation ::lifecycle/polling-started}
+           {:prefix      [::lifecycle/start-requested
+                          ::lifecycle/engine-submission-started
+                          ::lifecycle/engine-invocation-started
+                          ::lifecycle/connector-started
+                          ::lifecycle/polling-started]
+            :observation ::lifecycle/completion-observed}]]
+    (let [trace (lifecycle/append-observation prefix observation)]
+      (is (= observation (nth trace (- (count trace) 2))))
+      (is (= ::lifecycle/protocol-anomaly
+             (:observation (last trace))))
+      (is (= 1 (count (filter #(= ::lifecycle/protocol-anomaly
+                                  (:observation %))
+                             trace))))))
+  (doseq [observation [::lifecycle/engine-submission-started
+                      ::lifecycle/engine-invocation-started
+                      ::lifecycle/connector-started
+                      ::lifecycle/polling-started
+                      ::lifecycle/stop-requested
+                      ::lifecycle/polling-stopped
+                      ::lifecycle/connector-stopped
+                      ::lifecycle/completion-observed
+                      ::lifecycle/engine-invocation-cancelled]]
+    (let [trace (lifecycle/append-observation
+                 [::lifecycle/start-requested
+                  ::lifecycle/engine-submission-anomaly]
+                 observation)]
+      (is (= observation (nth trace (- (count trace) 2))))
+      (is (= ::lifecycle/protocol-anomaly
+             (:observation (last trace))))
+      (is (= 1 (count (filter #(= ::lifecycle/protocol-anomaly
+                                  (:observation %))
+                             trace)))))))
+
+(deftest terminal-results-preserve-the-observed-outcome
+  (let [failed-completion {:observation                  ::lifecycle/completion-observed
+                           :cognitect.anomalies/category :cognitect.anomalies/fault
+                           :debezium-embedded/cause      :upstream-failure}
+        late-anomaly      {:observation                  ::lifecycle/shutdown-anomaly
+                           :cognitect.anomalies/category :cognitect.anomalies/fault
+                           :debezium-embedded/cause      :late-shutdown-failure}
+        rejection         {:observation                  ::lifecycle/engine-submission-anomaly
+                           :cognitect.anomalies/category :cognitect.anomalies/fault
+                           :debezium-embedded/cause      :submission-rejected}
+        failed-trace      (lifecycle/append-observation
+                           [::lifecycle/start-requested
+                            ::lifecycle/engine-submission-started
+                            ::lifecycle/engine-invocation-started
+                            ::lifecycle/stop-requested]
+                           failed-completion)
+        successful-trace  (lifecycle/append-observation
+                           [::lifecycle/start-requested
+                            ::lifecycle/engine-submission-started
+                            ::lifecycle/engine-invocation-started
+                            ::lifecycle/connector-started
+                            ::lifecycle/polling-started
+                            ::lifecycle/stop-requested
+                            ::lifecycle/polling-stopped
+                            ::lifecycle/connector-stopped
+                            ::lifecycle/completion-observed]
+                           late-anomaly)
+        cancelled-trace   (-> [::lifecycle/start-requested
+                               ::lifecycle/engine-submission-started
+                               ::lifecycle/engine-invocation-cancelled]
+                              (lifecycle/append-observation rejection))
+        graceful-trace    [::lifecycle/start-requested
+                           ::lifecycle/engine-submission-started
+                           ::lifecycle/engine-invocation-started
+                           ::lifecycle/connector-started
+                           ::lifecycle/polling-started
+                           ::lifecycle/batch-admitted
+                           ::lifecycle/batch-handled
+                           ::lifecycle/batch-acknowledged
+                           ::lifecycle/stop-requested
+                           ::lifecycle/polling-stopped
+                           ::lifecycle/connector-stopped
+                           ::lifecycle/completion-observed]]
+    (is (= :upstream-failure
+           (:debezium-embedded/cause (lifecycle/terminal-anomaly failed-trace))))
+    (is (nil? (lifecycle/terminal-anomaly successful-trace)))
+    (is (nil? (lifecycle/terminal-anomaly cancelled-trace)))
+    (is (true? (lifecycle/graceful-completion? graceful-trace)))))
+
 (deftest normal-start-trace-becomes-capturing
   (is (= :debezium-embedded.lifecycle/ready
          (lifecycle/phase [])))

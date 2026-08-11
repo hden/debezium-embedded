@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Wrapper-owned `start!` and synchronous `stop!` lifecycle operations.
 - `::on-event` for translated, best-effort lifecycle observations.
 - Lifecycle and acknowledgement tests for shutdown safety.
+- A TLC-checked finite model of the wrapper lifecycle decisions.
 
 ### Changed
 
@@ -34,6 +35,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Prevent acknowledgement after consumer or acknowledgement failure.
 - Retry a startup-time shutdown rejection once after polling begins.
+- Prevent a queued engine invocation or a shutdown request from starting after
+  its lifecycle boundary has closed.
+- Keep a successful completion or cancelled invocation as the terminal result
+  when a later upstream outcome arrives.
 
 [Unreleased]: https://github.com/hden/debezium-embedded/compare/v4.0.0...HEAD
 [4.0.0]: https://github.com/hden/debezium-embedded/compare/v3.1.0...v4.0.0

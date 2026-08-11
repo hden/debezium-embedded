@@ -63,47 +63,122 @@
    :cognitect.anomalies/message  "Change-event acknowledgement failed"
    :debezium-embedded/cause      cause})
 
+(defn- shutdown-anomaly [cause]
+  {:observation                  ::lifecycle/shutdown-anomaly
+   :cognitect.anomalies/category :cognitect.anomalies/fault
+   :cognitect.anomalies/message  "Engine shutdown failed"
+   :debezium-embedded/cause      cause})
+
+(defn- append-observation! [observations observation]
+  (loop []
+    (let [before @observations
+          after  (lifecycle/append-observation before observation)]
+      (if (compare-and-set! observations before after)
+        after
+        (recur)))))
+
+(defn- append-when! [observations allowed? observation]
+  (loop []
+    (let [before @observations]
+      (cond
+        (not (allowed? before)) false
+        (compare-and-set! observations before
+                          (lifecycle/append-observation before observation)) true
+        :else (recur)))))
+
+(defn- append-when-and-emit! [observations emit allowed? observation]
+  (when (append-when! observations allowed? observation)
+    (when emit (emit observations))
+    true))
+
 (defn- observe! [observations emit observation]
-  (locking observations
-    (swap! observations lifecycle/append-observation observation)
-    (when emit (emit observation))))
+  (append-observation! observations observation)
+  (when emit (emit observations)))
+
+(defn- request-shutdown! [observations emit engine]
+  (when (append-when-and-emit! observations emit
+          #(= ::lifecycle/stopping (lifecycle/phase %))
+          ::lifecycle/shutdown-request-started)
+    (try
+      (.close ^Closeable engine)
+      (observe! observations emit ::lifecycle/shutdown-returned)
+      (catch Throwable cause
+        (observe! observations emit (shutdown-anomaly cause))))))
+
+(defn- observed? [observations kind]
+  (some #(= kind (if (keyword? %)
+                   %
+                   (:observation %)))
+        observations))
+
+(defn- retry-shutdown? [observations]
+  (and (= ::lifecycle/stopping (lifecycle/phase observations))
+       (observed? observations ::lifecycle/shutdown-anomaly)
+       (= 1 (count (filter #{::lifecycle/polling-started} observations)))
+       (< (count (filter #{::lifecycle/shutdown-request-started} observations)) 2)))
 
 (defn- event-dispatcher [on-event]
   (when on-event
     (let [executor (ThreadPoolExecutor. 1 1 0 TimeUnit/MILLISECONDS
                                         (ArrayBlockingQueue. 64)
-                                        (ThreadPoolExecutor$DiscardPolicy.))]
-      {:emit     (fn [observation]
-                   (.execute executor
-                             ^Runnable
-                             (fn [] (try (on-event {:debezium-embedded.core/event :debezium-embedded.core/observation-recorded
-                                                    :debezium-embedded.core/observation observation})
-                                         (catch Throwable _)))))
-       :shutdown #(.shutdownNow executor)})))
+                                        (ThreadPoolExecutor$DiscardPolicy.))
+          next-index (atom 0)
+          draining?  (atom false)]
+      (letfn [(drain! [observations]
+                (when (compare-and-set! draining? false true)
+                  (loop []
+                    (let [trace @observations
+                          index @next-index]
+                      (if (< index (count trace))
+                        (do
+                          (try
+                            (.execute executor
+                                      ^Runnable
+                                      (fn []
+                                        (try
+                                          (on-event {:debezium-embedded.core/event :debezium-embedded.core/observation-recorded
+                                                     :debezium-embedded.core/observation (nth trace index)})
+                                          (catch Throwable _))))
+                            (catch Throwable _))
+                          (reset! next-index (inc index))
+                          (recur))
+                        (do
+                          (reset! draining? false)
+                          (when (< @next-index (count @observations))
+                            (drain! observations))))))))]
+        {:emit     drain!
+         :shutdown #(.shutdownNow executor)}))))
 
 (defn- batch-consumer [observations emit consumer]
   (reify DebeziumEngine$ChangeConsumer
     (handleBatch [_ records committer]
-      (locking observations
-        (when (lifecycle/admitting? @observations)
-          (observe! observations emit ::lifecycle/batch-admitted)
-          (try
-            (consumer (mapv #(source-record->map (.record %)) records))
-            (observe! observations emit ::lifecycle/batch-handled)
-            (catch Throwable cause
-              (observe! observations emit (consumer-anomaly cause))
-              (throw cause)))
-          (try
-            (doseq [record records]
-              (observe! observations emit ::lifecycle/record-acknowledgement-attempted)
-              (.markProcessed committer record)
-              (observe! observations emit ::lifecycle/record-acknowledged))
-            (observe! observations emit ::lifecycle/batch-acknowledgement-attempted)
-            (.markBatchFinished committer)
-            (observe! observations emit ::lifecycle/batch-acknowledged)
-            (catch Throwable cause
-              (observe! observations emit (acknowledgement-anomaly cause))
-              (throw cause))))))))
+      (when (append-when-and-emit! observations emit lifecycle/admitting?
+              ::lifecycle/batch-admitted)
+        (try
+          (consumer (mapv #(source-record->map (.record %)) records))
+          (observe! observations emit ::lifecycle/batch-handled)
+          (catch Throwable cause
+            (observe! observations emit (consumer-anomaly cause))
+            (throw cause)))
+        (loop [remaining-records (seq records)]
+          (if-let [record (first remaining-records)]
+            (when (append-when-and-emit! observations emit lifecycle/admitting?
+                    ::lifecycle/record-acknowledgement-started)
+              (try
+                (.markProcessed committer record)
+                (catch Throwable cause
+                  (observe! observations emit (acknowledgement-anomaly cause))
+                  (throw cause)))
+              (observe! observations emit ::lifecycle/record-acknowledged)
+              (recur (next remaining-records)))
+            (when (append-when-and-emit! observations emit lifecycle/admitting?
+                    ::lifecycle/batch-acknowledgement-started)
+              (try
+                (.markBatchFinished committer)
+                (observe! observations emit ::lifecycle/batch-acknowledged)
+                (catch Throwable cause
+                  (observe! observations emit (acknowledgement-anomaly cause))
+                  (throw cause))))))))))
 
 (defn- completion-callback [observations emit completion]
   (reify DebeziumEngine$CompletionCallback
@@ -118,22 +193,17 @@
         (deliver completion true)))))
 
 (defn- connector-callback [observations emit retry-shutdown!]
-  (let [retry? (atom true)]
-    (reify DebeziumEngine$ConnectorCallback
-      (connectorStarted [_]
-        (observe! observations emit ::lifecycle/connector-started))
-      (connectorStopped [_]
-        (observe! observations emit ::lifecycle/connector-stopped))
-      (pollingStarted [_]
-        (observe! observations emit ::lifecycle/polling-started)
-        (when (and (some #(or (= ::lifecycle/shutdown-anomaly %)
-                              (= ::lifecycle/shutdown-anomaly (:observation %)))
-                         @observations)
-                   (= ::lifecycle/stopping (lifecycle/phase @observations))
-                   (compare-and-set! retry? true false))
-          (retry-shutdown!)))
-      (pollingStopped [_]
-        (observe! observations emit ::lifecycle/polling-stopped)))))
+  (reify DebeziumEngine$ConnectorCallback
+    (connectorStarted [_]
+      (observe! observations emit ::lifecycle/connector-started))
+    (connectorStopped [_]
+      (observe! observations emit ::lifecycle/connector-stopped))
+    (pollingStarted [_]
+      (observe! observations emit ::lifecycle/polling-started)
+      (when (retry-shutdown? @observations)
+        (retry-shutdown!)))
+    (pollingStopped [_]
+      (observe! observations emit ::lifecycle/polling-stopped))))
 
 (defn create-engine [arg-map]
   (let [config                      (::config arg-map)
@@ -150,7 +220,7 @@
             emit         (:emit dispatcher)
             engine-ref   (atom nil)
             retry-shutdown! #(when-let [engine @engine-ref]
-                               (.close ^Closeable engine))
+                               (request-shutdown! observations emit engine))
             engine       (-> (DebeziumEngine/create (ChangeEventFormat/of Connect))
                            (.using (map->properties config))
                            (.notifying (batch-consumer observations emit consumer))
@@ -165,26 +235,65 @@
    :cognitect.anomalies/message  message
    :debezium-embedded/cause      cause})
 
+(defn- request-stop! [observations]
+  (loop []
+    (let [before          @observations
+          phase-before    (lifecycle/phase before)
+          invocation-started? (observed? before ::lifecycle/engine-invocation-started)
+          stop-requested? (observed? before ::lifecycle/stop-requested)]
+      (cond
+        (= phase-before ::lifecycle/stopped) {:outcome :stopped}
+        stop-requested? {:outcome :already-requested}
+        :else
+        (let [after-stop (lifecycle/append-observation before ::lifecycle/stop-requested)
+              cancel?    (and (not= phase-before ::lifecycle/ready)
+                              (not invocation-started?))
+              after      (if cancel?
+                           (lifecycle/append-observation after-stop
+                                                         ::lifecycle/engine-invocation-cancelled)
+                           after-stop)]
+          (if (compare-and-set! observations before after)
+            {:outcome (cond
+                        (= phase-before ::lifecycle/ready) :not-started
+                        cancel? :cancelled
+                        :else :shutdown-required)
+             :stop-appended? true}
+            (recur)))))))
+
+(defn- engine-invocation-runnable [engine observations emit]
+  (reify Runnable
+    (run [_]
+      (if (append-when-and-emit! observations emit
+            #(= ::lifecycle/starting (lifecycle/phase %))
+            ::lifecycle/engine-invocation-started)
+        (.run ^Runnable engine)))))
+
 (defn start! [^CaptureHandle handle {:keys [executor]}]
   (let [observations (.-observations handle)
         emit         (:emit (.-event-dispatcher handle))
         engine       (.-engine handle)
         executor     (or executor (ForkJoinPool/commonPool))]
-    (locking observations
-      (if (not= ::lifecycle/ready (lifecycle/phase @observations))
-        (incorrect "Engine cannot be started from its current lifecycle phase")
-        (do
-          (observe! observations emit ::lifecycle/start-requested)
-          (try
-            (observe! observations emit ::lifecycle/run-submitted)
-            (.execute ^Executor executor ^Runnable engine)
-            nil
-            (catch Throwable cause
-              (observe! observations emit {:observation                  ::lifecycle/run-submission-anomaly
-                                           :cognitect.anomalies/category :cognitect.anomalies/fault
-                                           :cognitect.anomalies/message  "Engine submission failed"
-                                           :debezium-embedded/cause      cause})
-              (fault "Engine submission failed" cause))))))))
+    (if-not (append-when-and-emit! observations emit
+              #(= ::lifecycle/ready (lifecycle/phase %))
+              ::lifecycle/start-requested)
+      (incorrect "Engine cannot be started from its current lifecycle phase")
+      (if-not (append-when-and-emit! observations emit
+                #(= ::lifecycle/starting (lifecycle/phase %))
+                ::lifecycle/engine-submission-started)
+        nil
+        (try
+          (.execute ^Executor executor
+                    ^Runnable (engine-invocation-runnable engine observations emit))
+          nil
+          (catch Throwable cause
+            (let [anomaly {:observation                  ::lifecycle/engine-submission-anomaly
+                           :cognitect.anomalies/category :cognitect.anomalies/fault
+                           :cognitect.anomalies/message  "Engine submission failed"
+                           :debezium-embedded/cause      cause}]
+              (observe! observations emit anomaly)
+              (when-not (observed? @observations
+                          ::lifecycle/engine-invocation-cancelled)
+                (fault "Engine submission failed" cause)))))))))
 
 (defn running? [^CaptureHandle handle]
   (lifecycle/admitting? @(.-observations handle)))
@@ -192,29 +301,20 @@
 (defn stop! [^CaptureHandle handle {:keys [timeout-ms]}]
   (let [observations (.-observations handle)
         emit         (:emit (.-event-dispatcher handle))
-        timeout-ms   (or timeout-ms (.-default-shutdown-timeout-ms handle))]
-    (locking observations
-      (if (contains? #{::lifecycle/ready ::lifecycle/stopped}
-                     (lifecycle/phase @observations))
-        (do
-          (when (= ::lifecycle/ready (lifecycle/phase @observations))
-            (observe! observations emit ::lifecycle/stop-requested))
-          (lifecycle/primary-anomaly @observations))
-        (do
-          (observe! observations emit ::lifecycle/stop-requested)
-          (try
-            (.close ^Closeable (.-engine handle))
-            (catch Throwable cause
-              (swap! observations conj {:observation                  ::lifecycle/shutdown-anomaly
-                                        :cognitect.anomalies/category :cognitect.anomalies/fault
-                                        :cognitect.anomalies/message  "Engine shutdown failed"
-                                        :debezium-embedded/cause      cause})))
-          (if (deref (.-completion handle) timeout-ms ::timed-out)
-            (or (lifecycle/primary-anomaly @observations)
-                (when-not (lifecycle/graceful-completion? @observations)
-                  {:cognitect.anomalies/category :cognitect.anomalies/fault
-                   :cognitect.anomalies/message  "Engine completion lacks graceful-shutdown evidence"}))
-            (let [anomaly {:cognitect.anomalies/category :cognitect.anomalies/unavailable
-                           :cognitect.anomalies/message  "Engine shutdown remained unconfirmed"}]
-              (swap! observations conj (assoc anomaly :observation ::lifecycle/shutdown-unconfirmed))
-              anomaly)))))))
+        timeout-ms   (or timeout-ms (.-default-shutdown-timeout-ms handle))
+        {:keys [outcome stop-appended?]} (request-stop! observations)]
+    (when (and stop-appended? emit)
+      (emit observations))
+    (when (= outcome :shutdown-required)
+      (request-shutdown! observations emit (.-engine handle)))
+    (if (contains? #{:not-started :cancelled :stopped} outcome)
+      (lifecycle/terminal-anomaly @observations)
+      (if (deref (.-completion handle) timeout-ms ::timed-out)
+        (or (lifecycle/terminal-anomaly @observations)
+            (when-not (lifecycle/graceful-completion? @observations)
+              {:cognitect.anomalies/category :cognitect.anomalies/fault
+               :cognitect.anomalies/message  "Engine completion lacks graceful-shutdown evidence"}))
+        (let [anomaly {:cognitect.anomalies/category :cognitect.anomalies/unavailable
+                       :cognitect.anomalies/message  "Engine shutdown remained unconfirmed"}]
+          (observe! observations emit (assoc anomaly :observation ::lifecycle/shutdown-unconfirmed))
+          anomaly)))))

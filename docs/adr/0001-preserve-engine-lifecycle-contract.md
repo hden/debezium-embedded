@@ -56,10 +56,11 @@ defaults to in-memory offsets. `MemoryOffsetBackingStore` is an explicit test
 fixture, not a public library default or recovery mechanism.
 
 Successful `stop!` means that the wrapper observed graceful termination and
-all admitted batches were acknowledged. It does not certify durable offset
-persistence: Debezium can suppress an `OffsetBackingStore.stop` failure before
-it reaches the completion callback. The configured store is therefore an
-explicit external precondition, and observable failures remain anomalies.
+aggregate acknowledgement evidence. It does not certify a particular batch's
+durable offset persistence: Debezium can suppress an `OffsetBackingStore.stop`
+failure before it reaches the completion callback. The configured store is
+therefore an explicit external precondition, and observable failures remain
+anomalies.
 
 The optional event hook is asynchronous best-effort observability. Its bounded
 delivery queue may discard an event rather than delay capture, acknowledgement,

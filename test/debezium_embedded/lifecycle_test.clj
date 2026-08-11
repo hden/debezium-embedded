@@ -75,6 +75,8 @@
       (is (= observation (nth trace (- (count trace) 2))))
       (is (= ::lifecycle/protocol-anomaly
              (:observation (last trace))))
+      (is (= observation
+             (:observation/value (last trace))))
       (is (= 1 (count (filter #(= ::lifecycle/protocol-anomaly
                                   (:observation %))
                              trace))))))
@@ -94,6 +96,8 @@
       (is (= observation (nth trace (- (count trace) 2))))
       (is (= ::lifecycle/protocol-anomaly
              (:observation (last trace))))
+      (is (= observation
+             (:observation/value (last trace))))
       (is (= 1 (count (filter #(= ::lifecycle/protocol-anomaly
                                   (:observation %))
                              trace)))))))
@@ -141,8 +145,11 @@
                            ::lifecycle/polling-stopped
                            ::lifecycle/connector-stopped
                            ::lifecycle/completion-observed]]
-    (is (= :upstream-failure
-           (:debezium-embedded/cause (lifecycle/terminal-anomaly failed-trace))))
+    (is (= {:cognitect.anomalies/category :cognitect.anomalies/fault
+            :debezium-embedded/cause      :upstream-failure}
+           (select-keys (lifecycle/terminal-anomaly failed-trace)
+                        [:cognitect.anomalies/category
+                         :debezium-embedded/cause])))
     (is (nil? (lifecycle/terminal-anomaly successful-trace)))
     (is (nil? (lifecycle/terminal-anomaly cancelled-trace)))
     (is (true? (lifecycle/graceful-completion? graceful-trace)))))

@@ -8,17 +8,20 @@
    (io.debezium.engine.format ChangeEventFormat)
    (java.io Closeable)
    (java.util Properties)
-   (java.util.concurrent Executor ForkJoinPool)
+   (java.util.concurrent ArrayBlockingQueue Executor ForkJoinPool ThreadPoolExecutor ThreadPoolExecutor$DiscardPolicy TimeUnit)
    (org.apache.kafka.connect.data Field Struct)
    (org.apache.kafka.connect.source SourceRecord)))
 
 (declare stop!)
 
-(deftype CaptureHandle [engine observations completion default-shutdown-timeout-ms]
+(deftype CaptureHandle [engine observations completion event-dispatcher default-shutdown-timeout-ms]
   Closeable
   (close [this]
-    (when-let [anomaly (stop! this {})]
-      (throw (ex-info "Unable to stop Debezium capture" anomaly)))))
+    (let [result (stop! this {})]
+      (when-let [shutdown (:shutdown (.-event-dispatcher this))]
+        (shutdown))
+      (when result
+        (throw (ex-info "Unable to stop Debezium capture" result))))))
 
 (defn- incorrect [message]
   {:cognitect.anomalies/category :cognitect.anomalies/incorrect
@@ -60,34 +63,48 @@
    :cognitect.anomalies/message  "Change-event acknowledgement failed"
    :debezium-embedded/cause      cause})
 
-(defn- observe! [observations observation]
-  (swap! observations lifecycle/append-observation observation))
+(defn- observe! [observations emit observation]
+  (swap! observations lifecycle/append-observation observation)
+  (when emit (emit observation)))
 
-(defn- batch-consumer [observations consumer]
+(defn- event-dispatcher [on-event]
+  (when on-event
+    (let [executor (ThreadPoolExecutor. 1 1 0 TimeUnit/MILLISECONDS
+                                        (ArrayBlockingQueue. 64)
+                                        (ThreadPoolExecutor$DiscardPolicy.))]
+      {:emit     (fn [observation]
+                   (.execute executor
+                             ^Runnable
+                             (fn [] (try (on-event {:debezium-embedded.core/event :debezium-embedded.core/observation-recorded
+                                                    :debezium-embedded.core/observation observation})
+                                         (catch Throwable _)))))
+       :shutdown #(.shutdownNow executor)})))
+
+(defn- batch-consumer [observations emit consumer]
   (reify DebeziumEngine$ChangeConsumer
     (handleBatch [_ records committer]
       (locking observations
         (when (lifecycle/admitting? @observations)
-          (observe! observations ::lifecycle/batch-admitted)
+          (observe! observations emit ::lifecycle/batch-admitted)
           (try
             (consumer (mapv #(source-record->map (.record %)) records))
-            (observe! observations ::lifecycle/batch-handled)
+            (observe! observations emit ::lifecycle/batch-handled)
             (catch Throwable cause
-              (observe! observations (consumer-anomaly cause))
+              (observe! observations emit (consumer-anomaly cause))
               (throw cause)))
           (try
             (doseq [record records]
-              (observe! observations ::lifecycle/record-acknowledgement-attempted)
+              (observe! observations emit ::lifecycle/record-acknowledgement-attempted)
               (.markProcessed committer record)
-              (observe! observations ::lifecycle/record-acknowledged))
-            (observe! observations ::lifecycle/batch-acknowledgement-attempted)
+              (observe! observations emit ::lifecycle/record-acknowledged))
+            (observe! observations emit ::lifecycle/batch-acknowledgement-attempted)
             (.markBatchFinished committer)
-            (observe! observations ::lifecycle/batch-acknowledged)
+            (observe! observations emit ::lifecycle/batch-acknowledged)
             (catch Throwable cause
-              (observe! observations (acknowledgement-anomaly cause))
+              (observe! observations emit (acknowledgement-anomaly cause))
               (throw cause))))))))
 
-(defn- completion-callback [observations completion]
+(defn- completion-callback [observations emit completion]
   (reify DebeziumEngine$CompletionCallback
     (handle [_ success message error]
       (let [observation (if success
@@ -96,19 +113,19 @@
                            :cognitect.anomalies/category :cognitect.anomalies/fault
                            :cognitect.anomalies/message  message
                            :debezium-embedded/cause      error})]
-        (observe! observations observation)
+        (observe! observations emit observation)
         (deliver completion true)))))
 
-(defn- connector-callback [observations]
+(defn- connector-callback [observations emit]
   (reify DebeziumEngine$ConnectorCallback
     (connectorStarted [_]
-      (observe! observations ::lifecycle/connector-started))
+      (observe! observations emit ::lifecycle/connector-started))
     (connectorStopped [_]
-      (observe! observations ::lifecycle/connector-stopped))
+      (observe! observations emit ::lifecycle/connector-stopped))
     (pollingStarted [_]
-      (observe! observations ::lifecycle/polling-started))
+      (observe! observations emit ::lifecycle/polling-started))
     (pollingStopped [_]
-      (observe! observations ::lifecycle/polling-stopped))))
+      (observe! observations emit ::lifecycle/polling-stopped))))
 
 (defn create-engine [arg-map]
   (let [config                      (::config arg-map)
@@ -121,13 +138,15 @@
       :else
       (let [observations (atom [])
             completion   (promise)
+            dispatcher   (event-dispatcher (::on-event arg-map))
+            emit         (:emit dispatcher)
             engine       (-> (DebeziumEngine/create (ChangeEventFormat/of Connect))
                            (.using (map->properties config))
-                           (.notifying (batch-consumer observations consumer))
-                           (.using (completion-callback observations completion))
-                           (.using (connector-callback observations))
+                           (.notifying (batch-consumer observations emit consumer))
+                           (.using (completion-callback observations emit completion))
+                           (.using (connector-callback observations emit))
                            (.build))]
-        (CaptureHandle. engine observations completion default-shutdown-timeout-ms)))))
+        (CaptureHandle. engine observations completion dispatcher default-shutdown-timeout-ms)))))
 
 (defn- fault [message cause]
   {:cognitect.anomalies/category :cognitect.anomalies/fault
@@ -136,22 +155,23 @@
 
 (defn start! [^CaptureHandle handle {:keys [executor]}]
   (let [observations (.-observations handle)
+        emit         (:emit (.-event-dispatcher handle))
         engine       (.-engine handle)
         executor     (or executor (ForkJoinPool/commonPool))]
     (locking observations
       (if (not= ::lifecycle/ready (lifecycle/phase @observations))
         (incorrect "Engine cannot be started from its current lifecycle phase")
         (do
-          (swap! observations conj ::lifecycle/start-requested)
+          (observe! observations emit ::lifecycle/start-requested)
           (try
             (.execute ^Executor executor ^Runnable engine)
-            (swap! observations conj ::lifecycle/run-submitted)
+            (observe! observations emit ::lifecycle/run-submitted)
             nil
             (catch Throwable cause
-              (swap! observations conj {:observation                  ::lifecycle/run-submission-anomaly
-                                        :cognitect.anomalies/category :cognitect.anomalies/fault
-                                        :cognitect.anomalies/message  "Engine submission failed"
-                                        :debezium-embedded/cause      cause})
+              (observe! observations emit {:observation                  ::lifecycle/run-submission-anomaly
+                                           :cognitect.anomalies/category :cognitect.anomalies/fault
+                                           :cognitect.anomalies/message  "Engine submission failed"
+                                           :debezium-embedded/cause      cause})
               (fault "Engine submission failed" cause))))))))
 
 (defn running? [^CaptureHandle handle]
@@ -159,14 +179,15 @@
 
 (defn stop! [^CaptureHandle handle {:keys [timeout-ms]}]
   (let [observations (.-observations handle)
+        emit         (:emit (.-event-dispatcher handle))
         timeout-ms   (or timeout-ms (.-default-shutdown-timeout-ms handle))]
     (locking observations
       (if (= ::lifecycle/ready (lifecycle/phase @observations))
         (do
-          (swap! observations conj ::lifecycle/stop-requested)
+          (observe! observations emit ::lifecycle/stop-requested)
           nil)
         (do
-          (swap! observations conj ::lifecycle/stop-requested)
+          (observe! observations emit ::lifecycle/stop-requested)
           (try
             (.close ^Closeable (.-engine handle))
             (catch Throwable cause

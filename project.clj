@@ -1,4 +1,4 @@
-(defproject hden/debezium-embedded "3.1.0-SNAPSHOT"
+(defproject hden/debezium-embedded "4.0.0-SNAPSHOT"
   :description "A Clojure wrapper for the debezium-embedded engine."
   :url "https://github.com/hden/debezium-embedded"
   :license {:name "Apache License 2.0"

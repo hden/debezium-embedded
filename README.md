@@ -7,20 +7,20 @@ A Clojure wrapper for the Debezium embedded engine.
 ## Installation
 
 ```clojure
-[hden/debezium-embedded "3.1.0-SNAPSHOT"]
+[hden/debezium-embedded "4.0.0-SNAPSHOT"]
 ```
 
 ## Dependencies
 
 - Clojure 1.12.0 or higher
-- Debezium Embedded 3.1.0.Final
+- Debezium Embedded 3.6.1.Final
 - PostgreSQL connector (if using PostgreSQL)
 
 ## Usage
 
 ```clojure
 (ns your-namespace
-  (:require [debezium-embedded.core :refer [create-engine]]))
+  (:require [debezium-embedded.core :as core]))
 
 ;; Create configuration
 (def config
@@ -42,10 +42,14 @@ A Clojure wrapper for the Debezium embedded engine.
 (defn handle-events [records]
   (println "Received records:" records))
 
-;; Create and run the engine
-(with-open [engine (create-engine {:config config
-                                 :consumer handle-events})]
-  (.execute thread-pool engine))
+;; Create, start, and stop the wrapper-owned engine.
+;; Use a durable OffsetBackingStore in production; this in-memory store is
+;; appropriate only for ephemeral local runs.
+(with-open [engine (core/create-engine {::core/config config
+                                        ::core/consumer handle-events})]
+  (core/start! engine {})
+  ;; ... application work ...
+  (core/stop! engine {}))
 ```
 
 ## Record Structure

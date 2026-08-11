@@ -55,6 +55,18 @@
                                     ::core/consumer (constantly nil)})]
     (is (nil? (core/stop! handle {})))))
 
+(deftest event-hook-receives-wrapper-observations-asynchronously
+  (let [events   (promise)
+        executor (reify java.util.concurrent.Executor
+                   (execute [_ _]))
+        handle   (core/create-engine {::core/config   (ephemeral-postgres-config)
+                                      ::core/consumer (constantly nil)
+                                      ::core/on-event #(deliver events %)})]
+    (is (nil? (core/start! handle {:executor executor})))
+    (is (= {:debezium-embedded.core/event       :debezium-embedded.core/observation-recorded
+            :debezium-embedded.core/observation ::lifecycle/start-requested}
+           (deref events 1000 ::timed-out)))))
+
 (deftest source-records-keep-the-existing-event-map-shape
   (let [record (org.apache.kafka.connect.source.SourceRecord.
                  {"server" "postgres"}
@@ -81,6 +93,7 @@
                     (buildOffsets [_] nil))
         consumer (#'debezium-embedded.core/batch-consumer
                    observations
+                   nil
                    (fn [_] (throw (ex-info "consumer failed" {}))))]
     (is (thrown? clojure.lang.ExceptionInfo
                  (.handleBatch consumer [] committer)))
@@ -99,7 +112,7 @@
                     (markBatchFinished [_] (swap! acknowledgements conj :batch))
                     (markProcessed [_ _ _])
                     (buildOffsets [_] nil))
-        consumer (#'debezium-embedded.core/batch-consumer observations (constantly nil))]
+        consumer (#'debezium-embedded.core/batch-consumer observations nil (constantly nil))]
     (.handleBatch consumer [] committer)
     (is (= [:batch] @acknowledgements))))
 
@@ -112,7 +125,7 @@
                        (markBatchFinished [_] (throw (ex-info "acknowledgement failed" {})))
                        (markProcessed [_ _ _])
                        (buildOffsets [_] nil))
-        consumer     (#'debezium-embedded.core/batch-consumer observations (constantly nil))]
+        consumer     (#'debezium-embedded.core/batch-consumer observations nil (constantly nil))]
     (is (thrown? clojure.lang.ExceptionInfo
                  (.handleBatch consumer [] committer)))
     (is (= ::lifecycle/acknowledgement-anomaly

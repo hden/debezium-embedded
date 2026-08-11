@@ -3,9 +3,16 @@
 `EngineLifecycle.tla` models wrapper-owned safety decisions, not Debezium's
 private engine state and not the unbounded observation log. Its state is a
 small quotient: interpreted phase, engine invocation and shutdown boundaries,
-normal-protocol facts, one abstract batch, completion outcome, and the first
-malformed callback. Histories with the same future admission and shutdown
-consequences are deliberately one TLC state.
+normal-protocol facts, one abstract batch, completion outcome, and the raw
+kind of the first callback whose interpretation is rejected. Histories with
+the same future admission and shutdown consequences are deliberately one TLC
+state.
+
+The Clojure runtime derives the same finite projection by reducing its
+append-only observations through an interpretation table. It does not need
+`core.match`: the table is the implementation counterpart of this model's
+transition relation, so adding a control-flow dependency would not express an
+additional domain rule.
 
 Every Debezium callback is an input. A callback that cannot extend the normal
 protocol records its raw kind and protocol anomaly atomically, then reaches a

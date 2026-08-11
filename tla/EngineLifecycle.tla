@@ -5,7 +5,9 @@ EXTENDS Naturals, TLC
   This is a finite quotient of the wrapper's observation interpreter. It does
   not model Debezium's private state or the unbounded trace. It retains facts
   that change a later wrapper decision: effect starts and outcomes, callbacks,
-  terminal outcome, and one abstract batch.
+  terminal outcome, and one abstract batch. `rejectedCallbackKind` retains the
+  raw kind whose interpretation was rejected; it is not an assertion about
+  Debezium's private callback state.
 
   Each external call has three distinct parts:
     1. a pure interpretation decides whether it may start;
@@ -30,12 +32,14 @@ NoPhase == "no-phase"
 VARIABLES phase, submissionStarted, invocationStarted, invocationCancelled,
           connector, polling, stopRequested, completion, terminalAnomaly,
           protocolAnomaly, shutdownRequests, shutdownFailure, batchState,
-          invalidCallback, acknowledgementStartedPhase, gracefulConfirmed
+          rejectedCallbackKind, acknowledgementStartedPhase,
+          gracefulCompletionConfirmed
 
 Vars == <<phase, submissionStarted, invocationStarted, invocationCancelled,
           connector, polling, stopRequested, completion, terminalAnomaly,
           protocolAnomaly, shutdownRequests, shutdownFailure, batchState,
-          invalidCallback, acknowledgementStartedPhase, gracefulConfirmed>>
+          rejectedCallbackKind, acknowledgementStartedPhase,
+          gracefulCompletionConfirmed>>
 
 Init ==
   /\ phase = "ready"
@@ -51,13 +55,13 @@ Init ==
   /\ shutdownRequests = 0
   /\ shutdownFailure = FALSE
   /\ batchState = "none"
-  /\ invalidCallback = NoCallback
+  /\ rejectedCallbackKind = NoCallback
   /\ acknowledgementStartedPhase = NoPhase
-  /\ gracefulConfirmed = FALSE
+  /\ gracefulCompletionConfirmed = FALSE
 
-RecordInvalidCallback(kind) ==
+RejectCallback(kind) ==
   /\ kind \in Callbacks
-  /\ invalidCallback' = kind
+  /\ rejectedCallbackKind' = kind
   /\ protocolAnomaly' = TRUE
   /\ terminalAnomaly' = IF completion = "none" THEN TRUE ELSE terminalAnomaly
   /\ phase' = IF phase = "stopped" \/ completion # "none"
@@ -66,7 +70,7 @@ RecordInvalidCallback(kind) ==
   /\ UNCHANGED <<submissionStarted, invocationStarted, invocationCancelled,
                  connector, polling, stopRequested, completion, shutdownRequests,
                  shutdownFailure, batchState, acknowledgementStartedPhase,
-                 gracefulConfirmed>>
+                 gracefulCompletionConfirmed>>
 
 RequestStart ==
   /\ phase = "ready"
@@ -74,7 +78,8 @@ RequestStart ==
   /\ UNCHANGED <<submissionStarted, invocationStarted, invocationCancelled,
                  connector, polling, stopRequested, completion, terminalAnomaly,
                  protocolAnomaly, shutdownRequests, shutdownFailure, batchState,
-                 invalidCallback, acknowledgementStartedPhase, gracefulConfirmed>>
+                 rejectedCallbackKind, acknowledgementStartedPhase,
+                 gracefulCompletionConfirmed>>
 
 StartEngineSubmission ==
   /\ phase = "starting"
@@ -83,7 +88,8 @@ StartEngineSubmission ==
   /\ UNCHANGED <<phase, invocationStarted, invocationCancelled, connector,
                  polling, stopRequested, completion, terminalAnomaly,
                  protocolAnomaly, shutdownRequests, shutdownFailure, batchState,
-                 invalidCallback, acknowledgementStartedPhase, gracefulConfirmed>>
+                 rejectedCallbackKind, acknowledgementStartedPhase,
+                 gracefulCompletionConfirmed>>
 
 RejectEngineSubmission ==
   /\ submissionStarted
@@ -93,8 +99,8 @@ RejectEngineSubmission ==
   /\ phase' = IF invocationCancelled THEN phase ELSE "stopped"
   /\ UNCHANGED <<submissionStarted, invocationStarted, invocationCancelled,
                  connector, polling, stopRequested, completion, protocolAnomaly,
-                 shutdownRequests, shutdownFailure, batchState, invalidCallback,
-                 acknowledgementStartedPhase, gracefulConfirmed>>
+                 shutdownRequests, shutdownFailure, batchState, rejectedCallbackKind,
+                 acknowledgementStartedPhase, gracefulCompletionConfirmed>>
 
 StartEngineInvocation ==
   /\ phase = "starting"
@@ -106,7 +112,8 @@ StartEngineInvocation ==
   /\ UNCHANGED <<phase, submissionStarted, invocationCancelled, connector,
                  polling, stopRequested, completion, terminalAnomaly,
                  protocolAnomaly, shutdownRequests, shutdownFailure, batchState,
-                 invalidCallback, acknowledgementStartedPhase, gracefulConfirmed>>
+                 rejectedCallbackKind, acknowledgementStartedPhase,
+                 gracefulCompletionConfirmed>>
 
 RequestStop ==
   /\ ~stopRequested
@@ -118,8 +125,8 @@ RequestStop ==
   /\ invocationCancelled' = (phase = "starting" /\ ~invocationStarted)
   /\ UNCHANGED <<submissionStarted, invocationStarted, connector, polling,
                  completion, terminalAnomaly, protocolAnomaly, shutdownRequests,
-                 shutdownFailure, batchState, invalidCallback,
-                 acknowledgementStartedPhase, gracefulConfirmed>>
+                 shutdownFailure, batchState, rejectedCallbackKind,
+                 acknowledgementStartedPhase, gracefulCompletionConfirmed>>
 
 ReceiveConnectorStarted ==
   /\ ~protocolAnomaly
@@ -128,9 +135,9 @@ ReceiveConnectorStarted ==
           /\ UNCHANGED <<phase, submissionStarted, invocationStarted,
                          invocationCancelled, polling, stopRequested, completion,
                          terminalAnomaly, protocolAnomaly, shutdownRequests,
-                         shutdownFailure, batchState, invalidCallback,
-                         acknowledgementStartedPhase, gracefulConfirmed>>
-     ELSE RecordInvalidCallback("connector-started")
+                         shutdownFailure, batchState, rejectedCallbackKind,
+                         acknowledgementStartedPhase, gracefulCompletionConfirmed>>
+     ELSE RejectCallback("connector-started")
 
 ReceiveConnectorStopped ==
   /\ ~protocolAnomaly
@@ -140,9 +147,9 @@ ReceiveConnectorStopped ==
           /\ UNCHANGED <<submissionStarted, invocationStarted,
                          invocationCancelled, polling, stopRequested, completion,
                          terminalAnomaly, protocolAnomaly, shutdownRequests,
-                         shutdownFailure, batchState, invalidCallback,
-                         acknowledgementStartedPhase, gracefulConfirmed>>
-     ELSE RecordInvalidCallback("connector-stopped")
+                         shutdownFailure, batchState, rejectedCallbackKind,
+                         acknowledgementStartedPhase, gracefulCompletionConfirmed>>
+     ELSE RejectCallback("connector-stopped")
 
 ReceivePollingStarted ==
   /\ ~protocolAnomaly
@@ -153,8 +160,8 @@ ReceivePollingStarted ==
           /\ UNCHANGED <<submissionStarted, invocationStarted,
                          invocationCancelled, connector, stopRequested, completion,
                          terminalAnomaly, protocolAnomaly, shutdownRequests,
-                         shutdownFailure, batchState, invalidCallback,
-                         acknowledgementStartedPhase, gracefulConfirmed>>
+                         shutdownFailure, batchState, rejectedCallbackKind,
+                         acknowledgementStartedPhase, gracefulCompletionConfirmed>>
      ELSE IF (phase = "stopping" /\ shutdownFailure /\ invocationStarted
               /\ connector = "started"
               /\ polling = "none")
@@ -163,9 +170,9 @@ ReceivePollingStarted ==
                               invocationCancelled, connector, stopRequested,
                               completion, terminalAnomaly, protocolAnomaly,
                               shutdownRequests, shutdownFailure, batchState,
-                              invalidCallback, acknowledgementStartedPhase,
-                              gracefulConfirmed>>
-     ELSE RecordInvalidCallback("polling-started")
+                              rejectedCallbackKind, acknowledgementStartedPhase,
+                              gracefulCompletionConfirmed>>
+     ELSE RejectCallback("polling-started")
 
 ReceivePollingStopped ==
   /\ ~protocolAnomaly
@@ -175,9 +182,9 @@ ReceivePollingStopped ==
           /\ UNCHANGED <<submissionStarted, invocationStarted,
                          invocationCancelled, connector, stopRequested, completion,
                          terminalAnomaly, protocolAnomaly, shutdownRequests,
-                         shutdownFailure, batchState, invalidCallback,
-                         acknowledgementStartedPhase, gracefulConfirmed>>
-     ELSE RecordInvalidCallback("polling-stopped")
+                         shutdownFailure, batchState, rejectedCallbackKind,
+                         acknowledgementStartedPhase, gracefulCompletionConfirmed>>
+     ELSE RejectCallback("polling-stopped")
 
 ReceiveSuccessfulCompletion ==
   /\ completion = "none"
@@ -187,30 +194,30 @@ ReceiveSuccessfulCompletion ==
           /\ UNCHANGED <<submissionStarted, invocationStarted,
                          invocationCancelled, connector, polling, stopRequested,
                          terminalAnomaly, protocolAnomaly, shutdownRequests,
-                         shutdownFailure, batchState, invalidCallback,
-                         acknowledgementStartedPhase, gracefulConfirmed>>
+                         shutdownFailure, batchState, rejectedCallbackKind,
+                         acknowledgementStartedPhase, gracefulCompletionConfirmed>>
      ELSE /\ completion' = "succeeded"
-          /\ invalidCallback' = "completion-observed"
+          /\ rejectedCallbackKind' = "completion-observed"
           /\ protocolAnomaly' = TRUE
           /\ terminalAnomaly' = TRUE
           /\ phase' = "stopped"
           /\ UNCHANGED <<submissionStarted, invocationStarted,
                          invocationCancelled, connector, polling, stopRequested,
                          shutdownRequests, shutdownFailure, batchState,
-                         acknowledgementStartedPhase, gracefulConfirmed>>
+                         acknowledgementStartedPhase, gracefulCompletionConfirmed>>
 
 ReceiveFailedCompletion ==
   /\ completion = "none"
   /\ completion' = "failed"
   /\ terminalAnomaly' = TRUE
   /\ protocolAnomaly' = (protocolAnomaly \/ phase # "stopping")
-  /\ invalidCallback' = IF phase = "stopping" THEN invalidCallback
+  /\ rejectedCallbackKind' = IF phase = "stopping" THEN rejectedCallbackKind
                       ELSE "completion-observed"
   /\ phase' = "stopped"
   /\ UNCHANGED <<submissionStarted, invocationStarted, invocationCancelled,
                  connector, polling, stopRequested, shutdownRequests,
                  shutdownFailure, batchState, acknowledgementStartedPhase,
-                 gracefulConfirmed>>
+                 gracefulCompletionConfirmed>>
 
 StartShutdownRequest ==
   /\ phase = "stopping"
@@ -222,8 +229,8 @@ StartShutdownRequest ==
   /\ UNCHANGED <<phase, submissionStarted, invocationStarted,
                  invocationCancelled, connector, polling, stopRequested,
                  completion, terminalAnomaly, protocolAnomaly, shutdownFailure,
-                 batchState, invalidCallback, acknowledgementStartedPhase,
-                 gracefulConfirmed>>
+                 batchState, rejectedCallbackKind, acknowledgementStartedPhase,
+                 gracefulCompletionConfirmed>>
 
 RecordShutdownFailure ==
   /\ shutdownRequests > 0
@@ -233,8 +240,8 @@ RecordShutdownFailure ==
   /\ phase' = IF completion = "none" THEN "stopping" ELSE phase
   /\ UNCHANGED <<submissionStarted, invocationStarted, invocationCancelled,
                  connector, polling, stopRequested, completion, protocolAnomaly,
-                 shutdownRequests, batchState, invalidCallback,
-                 acknowledgementStartedPhase, gracefulConfirmed>>
+                 shutdownRequests, batchState, rejectedCallbackKind,
+                 acknowledgementStartedPhase, gracefulCompletionConfirmed>>
 
 AdmitBatch ==
   /\ phase = "capturing"
@@ -243,8 +250,8 @@ AdmitBatch ==
   /\ UNCHANGED <<phase, submissionStarted, invocationStarted,
                  invocationCancelled, connector, polling, stopRequested,
                  completion, terminalAnomaly, protocolAnomaly, shutdownRequests,
-                 shutdownFailure, invalidCallback, acknowledgementStartedPhase,
-                 gracefulConfirmed>>
+                 shutdownFailure, rejectedCallbackKind, acknowledgementStartedPhase,
+                 gracefulCompletionConfirmed>>
 
 HandleBatch ==
   /\ phase = "capturing"
@@ -253,8 +260,8 @@ HandleBatch ==
   /\ UNCHANGED <<phase, submissionStarted, invocationStarted,
                  invocationCancelled, connector, polling, stopRequested,
                  completion, terminalAnomaly, protocolAnomaly, shutdownRequests,
-                 shutdownFailure, invalidCallback, acknowledgementStartedPhase,
-                 gracefulConfirmed>>
+                 shutdownFailure, rejectedCallbackKind, acknowledgementStartedPhase,
+                 gracefulCompletionConfirmed>>
 
 StartAcknowledgement ==
   /\ phase = "capturing"
@@ -266,7 +273,7 @@ StartAcknowledgement ==
   /\ UNCHANGED <<phase, submissionStarted, invocationStarted,
                  invocationCancelled, connector, polling, stopRequested,
                  completion, terminalAnomaly, protocolAnomaly, shutdownRequests,
-                 shutdownFailure, invalidCallback, gracefulConfirmed>>
+                 shutdownFailure, rejectedCallbackKind, gracefulCompletionConfirmed>>
 
 RecordAcknowledgement ==
   /\ batchState \in {"first-acknowledgement-started", "acknowledgement-started"}
@@ -276,8 +283,8 @@ RecordAcknowledgement ==
   /\ UNCHANGED <<phase, submissionStarted, invocationStarted,
                  invocationCancelled, connector, polling, stopRequested,
                  completion, terminalAnomaly, protocolAnomaly, shutdownRequests,
-                 shutdownFailure, invalidCallback, acknowledgementStartedPhase,
-                 gracefulConfirmed>>
+                 shutdownFailure, rejectedCallbackKind, acknowledgementStartedPhase,
+                 gracefulCompletionConfirmed>>
 
 RecordConsumerFailure ==
   /\ batchState \in {"admitted", "handled"}
@@ -286,8 +293,8 @@ RecordConsumerFailure ==
   /\ batchState' = "consumer-failed"
   /\ UNCHANGED <<submissionStarted, invocationStarted, invocationCancelled,
                  connector, polling, stopRequested, completion, protocolAnomaly,
-                 shutdownRequests, shutdownFailure, invalidCallback,
-                 acknowledgementStartedPhase, gracefulConfirmed>>
+                 shutdownRequests, shutdownFailure, rejectedCallbackKind,
+                 acknowledgementStartedPhase, gracefulCompletionConfirmed>>
 
 RecordAcknowledgementFailure ==
   /\ batchState \in {"first-acknowledgement-started", "acknowledgement-started"}
@@ -296,21 +303,21 @@ RecordAcknowledgementFailure ==
   /\ batchState' = "acknowledgement-failed"
   /\ UNCHANGED <<submissionStarted, invocationStarted, invocationCancelled,
                  connector, polling, stopRequested, completion, protocolAnomaly,
-                 shutdownRequests, shutdownFailure, invalidCallback,
-                 acknowledgementStartedPhase, gracefulConfirmed>>
+                 shutdownRequests, shutdownFailure, rejectedCallbackKind,
+                 acknowledgementStartedPhase, gracefulCompletionConfirmed>>
 
 ConfirmGracefulCompletion ==
-  /\ ~gracefulConfirmed
+  /\ ~gracefulCompletionConfirmed
   /\ phase = "stopped"
   /\ completion = "succeeded"
   /\ ~terminalAnomaly
   /\ batchState \in {"none", "acknowledged"}
   /\ connector \in {"none", "stopped"}
-  /\ gracefulConfirmed' = TRUE
+  /\ gracefulCompletionConfirmed' = TRUE
   /\ UNCHANGED <<phase, submissionStarted, invocationStarted,
                  invocationCancelled, connector, polling, stopRequested,
                  completion, terminalAnomaly, protocolAnomaly, shutdownRequests,
-                 shutdownFailure, batchState, invalidCallback,
+                 shutdownFailure, batchState, rejectedCallbackKind,
                  acknowledgementStartedPhase>>
 
 Next ==
@@ -349,9 +356,9 @@ TypeOK ==
   /\ shutdownRequests \in 0..2
   /\ shutdownFailure \in BOOLEAN
   /\ batchState \in BatchStates
-  /\ invalidCallback \in Callbacks \cup {NoCallback}
+  /\ rejectedCallbackKind \in Callbacks \cup {NoCallback}
   /\ acknowledgementStartedPhase \in Phases \cup {NoPhase}
-  /\ gracefulConfirmed \in BOOLEAN
+  /\ gracefulCompletionConfirmed \in BOOLEAN
 
 CaptureHasNormalFacts ==
   phase = "capturing" =>
@@ -374,12 +381,12 @@ AcknowledgementStartsOnlyWhileCapturing ==
   acknowledgementStartedPhase # NoPhase => acknowledgementStartedPhase = "capturing"
 
 InvalidCallbackRetainsRawFact ==
-  protocolAnomaly => invalidCallback \in Callbacks
+  protocolAnomaly => rejectedCallbackKind \in Callbacks
 
 ShutdownRequestIsBounded == shutdownRequests \in 0..2
 
 GracefulConfirmationHasEvidence ==
-  gracefulConfirmed =>
+  gracefulCompletionConfirmed =>
     /\ completion = "succeeded"
     /\ ~terminalAnomaly
     /\ batchState \in {"none", "acknowledged"}

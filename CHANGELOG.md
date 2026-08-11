@@ -11,6 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Accept the first `polling-stopped` callback after `stop-requested` as a
   normal graceful-shutdown callback; repeated callbacks remain anomalies.
+- Reject reordered or duplicate connector and polling callbacks while retaining
+  each raw observation and its protocol anomaly for diagnosis.
+
+### Changed
+
+- Consolidate lifecycle interpretation into one finite projection of observed
+  facts without changing the public API.
 
 ## [4.0.0] - 2026-08-11
 

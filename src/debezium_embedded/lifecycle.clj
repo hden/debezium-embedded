@@ -31,6 +31,60 @@
       (= kind ::polling-stopped) (if (= phase ::capturing) ::stopping phase)
       :else phase)))
 
+(def ^:private initial-projection
+  {:phase       ::ready
+   :engine      ::not-invoked
+   :connector   ::not-started
+   :polling     ::not-started
+   :shutdown    {:requests 0 :failed? false}
+   :completion  ::pending
+   :protocol?   false
+   :batches     {:admitted 0 :acknowledged 0}})
+
+(defn- interpret [projection observation]
+  (let [kind (observation-kind observation)]
+    (cond-> (assoc projection :phase (next-phase (:phase projection) observation))
+      (= kind ::engine-invocation-started)
+      (assoc :engine ::invoked)
+
+      (= kind ::engine-invocation-cancelled)
+      (assoc :engine ::cancelled)
+
+      (= kind ::engine-submission-anomaly)
+      (assoc :engine ::rejected)
+
+      (= kind ::connector-started)
+      (assoc :connector ::started)
+
+      (= kind ::connector-stopped)
+      (assoc :connector ::stopped)
+
+      (= kind ::polling-started)
+      (assoc :polling ::started)
+
+      (= kind ::polling-stopped)
+      (assoc :polling ::stopped)
+
+      (= kind ::shutdown-request-started)
+      (update-in [:shutdown :requests] inc)
+
+      (= kind ::shutdown-anomaly)
+      (assoc-in [:shutdown :failed?] true)
+
+      (= kind ::completion-observed)
+      (assoc :completion (if (anomaly-observation? observation)
+                           ::failed
+                           ::succeeded))
+
+      (= kind ::protocol-anomaly)
+      (assoc :protocol? true)
+
+      (= kind ::batch-admitted)
+      (update-in [:batches :admitted] inc)
+
+      (= kind ::batch-acknowledged)
+      (update-in [:batches :acknowledged] inc))))
+
 (defn- protocol-anomaly [observation]
   {:observation                  ::protocol-anomaly
    :cognitect.anomalies/category :cognitect.anomalies/fault

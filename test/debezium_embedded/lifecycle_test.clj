@@ -13,6 +13,21 @@
         [::lifecycle/connector-started
          ::lifecycle/polling-started]))
 
+(deftest interprets-normal-shutdown
+  (let [projection (reduce #'lifecycle/interpret
+                           @#'lifecycle/initial-projection
+                           (into (capturing-trace)
+                                 [::lifecycle/stop-requested
+                                  ::lifecycle/polling-stopped
+                                  ::lifecycle/connector-stopped
+                                  ::lifecycle/completion-observed]))]
+    (is (= {:phase      ::lifecycle/stopped
+            :engine     ::lifecycle/invoked
+            :connector  ::lifecycle/stopped
+            :polling    ::lifecycle/stopped
+            :completion ::lifecycle/succeeded}
+           (select-keys projection [:phase :engine :connector :polling :completion])))))
+
 (deftest literal-traces-project-to-normal-phases
   (doseq [{:keys [trace expected-phase]}
           [{:trace          []

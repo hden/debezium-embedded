@@ -147,11 +147,13 @@ only the finite facts that alter a later wrapper decision:
 **Consumes:** `interpret` from Task 2.
 
 **Produces:** a private interpretation table and one `interpret-observation`
-function:
+function. Its result separates the finite projection from whether this one
+observed fact requires a derived anomaly:
 
 ```clojure
 (interpret-observation projection observation)
-;; => a new projection, whose :protocol? records rejection when applicable
+;; => {:projection next-projection
+;;     :protocol-violation? boolean}
 ```
 
 - [ ] **Step 1: Write a failing observation-interpretation test**
@@ -171,14 +173,16 @@ function:
   Key the table by `[(:phase projection) observation-kind]`. Each recognised
   entry is a small named pure projection update. Its guard reads explicit
   projection fields; it does not rescan observations. Unknown events and
-  rejected guards use the existing protocol-anomaly path.
+  rejected guards return `:protocol-violation? true`. This per-observation
+  result is necessary because an already invalid trace must still derive an
+  anomaly for every further invalid raw callback.
 
 - [ ] **Step 4: Replace both old branch systems**
 
   Delete `next-phase`, `protocol-violation?`, and `phase-and-seen-kinds`.
-  Make `phase` call `(:phase (interpret observations))`, and make
-  `append-observation` ask `interpret-observation` whether to append the
-  derived anomaly.
+  Make `phase` call `(:phase (interpret observations))`. Let `interpret`
+  reduce the `:projection` result, and let `append-observation` use the
+  per-observation `:protocol-violation?` result to append the derived anomaly.
 
 - [ ] **Step 5: Run all interpreter tests**
 

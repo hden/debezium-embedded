@@ -58,7 +58,8 @@
                  (seen? ::connector-stopped)
                  (seen? ::polling-started)))
         (and (= kind ::polling-stopped)
-             (not= phase-before ::capturing))
+             (or (not (contains? #{::capturing ::stopping} phase-before))
+                 (seen? ::polling-stopped)))
         (and (= phase-before ::stopped)
              (not= kind ::protocol-anomaly)))))
 

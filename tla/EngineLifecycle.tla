@@ -169,7 +169,7 @@ ReceivePollingStarted ==
 
 ReceivePollingStopped ==
   /\ ~protocolAnomaly
-  /\ IF phase = "capturing" /\ polling = "started"
+  /\ IF phase \in {"capturing", "stopping"} /\ polling = "started"
      THEN /\ polling' = "stopped"
           /\ phase' = "stopping"
           /\ UNCHANGED <<submissionStarted, invocationStarted,

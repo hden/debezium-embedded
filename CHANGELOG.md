@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Accept the first `polling-stopped` callback after `stop-requested` as a
+  normal graceful-shutdown callback; repeated callbacks remain anomalies.
+
 ## [4.0.0] - 2026-08-11
 
 ### Added

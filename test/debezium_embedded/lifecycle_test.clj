@@ -65,6 +65,15 @@
                        ::lifecycle/stop-requested
                        ::lifecycle/completion-observed])))))
 
+(deftest polling-stop-after-stop-request-is-a-normal-shutdown-callback
+  (let [trace (-> (capturing-trace)
+                  (lifecycle/append-observation ::lifecycle/stop-requested)
+                  (lifecycle/append-observation ::lifecycle/polling-stopped)
+                  (lifecycle/append-observation ::lifecycle/connector-stopped)
+                  (lifecycle/append-observation ::lifecycle/completion-observed))]
+    (is (true? (lifecycle/graceful-completion? trace)))
+    (is (nil? (lifecycle/terminal-anomaly trace)))))
+
 (deftest failed-completion-is-terminal
   (let [failure {:observation                  ::lifecycle/completion-observed
                  :cognitect.anomalies/category :cognitect.anomalies/fault

@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "skills": {
+    "check-my-names": {
+      "source": "hden/skills",
+      "sourceType": "github",
+      "skillPath": "skills/check-my-names/SKILL.md",
+      "computedHash": "dfa5a1b18360ed0366f75492ee0aaf06cc817acd369516af06f67a287cef92d4"
+    },
+    "evolutionary-naming": {
+      "source": "kawasima/evolutionary-naming",
+      "sourceType": "github",
+      "skillPath": "skills/evolutionary-naming/SKILL.md",
+      "computedHash": "ade83a2f3ff799c9352d10fadc206486fb6ff18864b859b151b7c7dbfe89b785"
+    },
+    "nits": {
+      "source": "hden/skills",
+      "sourceType": "github",
+      "skillPath": "skills/nits/SKILL.md",
+      "computedHash": "06065a5f97aef8f33d47b3f1a0d7adde5657e04e23773cedfe3256b0613ae2ee"
+    },
+    "standard-clj": {
+      "source": "hden/skills",
+      "sourceType": "github",
+      "skillPath": "skills/standard-clj/SKILL.md",
+      "computedHash": "c247bf027b3c45011879adcb82dd0b6638aa76e42ea2cab3cb3f6bff596b3586"
+    }
+  }
+}

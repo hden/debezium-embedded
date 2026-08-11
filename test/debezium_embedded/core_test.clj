@@ -55,6 +55,19 @@
                                     ::core/consumer (constantly nil)})]
     (is (nil? (core/stop! handle {})))))
 
+(deftest close-is-idempotent-after-completion
+  (let [handle (debezium_embedded.core.CaptureHandle.
+                 nil
+                 (atom [::lifecycle/start-requested
+                        ::lifecycle/run-submitted
+                        ::lifecycle/stop-requested
+                        ::lifecycle/completion-observed])
+                 (promise)
+                 nil
+                 2000)]
+    (is (nil? (core/stop! handle {})))
+    (is (nil? (.close handle)))))
+
 (deftest event-hook-receives-wrapper-observations-asynchronously
   (let [events   (promise)
         executor (reify java.util.concurrent.Executor

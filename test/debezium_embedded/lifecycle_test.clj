@@ -65,3 +65,25 @@
                  ::lifecycle/batch-admitted
                  ::lifecycle/stop-requested
                  ::lifecycle/completion-observed]))))
+
+(deftest failed-completion-is-the-primary-anomaly
+  (let [failure {:observation                  ::lifecycle/completion-observed
+                 :cognitect.anomalies/category :cognitect.anomalies/fault
+                 :debezium-embedded/cause      :upstream-failure}
+        trace   (lifecycle/append-observation
+                  [::lifecycle/start-requested
+                   ::lifecycle/run-submitted
+                   ::lifecycle/stop-requested]
+                  failure)]
+    (is (= :upstream-failure
+           (:debezium-embedded/cause (lifecycle/primary-anomaly trace))))))
+
+(deftest duplicate-polling-start-is-a-protocol-anomaly
+  (let [trace (lifecycle/append-observation
+                [::lifecycle/start-requested
+                 ::lifecycle/run-submitted
+                 ::lifecycle/polling-started]
+                ::lifecycle/polling-started)]
+    (is (= ::lifecycle/stopping (lifecycle/phase trace)))
+    (is (= :cognitect.anomalies/fault
+           (:cognitect.anomalies/category (lifecycle/primary-anomaly trace))))))

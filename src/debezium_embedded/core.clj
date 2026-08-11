@@ -64,8 +64,9 @@
    :debezium-embedded/cause      cause})
 
 (defn- observe! [observations emit observation]
-  (swap! observations lifecycle/append-observation observation)
-  (when emit (emit observation)))
+  (locking observations
+    (swap! observations lifecycle/append-observation observation)
+    (when emit (emit observation))))
 
 (defn- event-dispatcher [on-event]
   (when on-event
@@ -175,8 +176,8 @@
         (do
           (observe! observations emit ::lifecycle/start-requested)
           (try
-            (.execute ^Executor executor ^Runnable engine)
             (observe! observations emit ::lifecycle/run-submitted)
+            (.execute ^Executor executor ^Runnable engine)
             nil
             (catch Throwable cause
               (observe! observations emit {:observation                  ::lifecycle/run-submission-anomaly
@@ -193,10 +194,12 @@
         emit         (:emit (.-event-dispatcher handle))
         timeout-ms   (or timeout-ms (.-default-shutdown-timeout-ms handle))]
     (locking observations
-      (if (= ::lifecycle/ready (lifecycle/phase @observations))
+      (if (contains? #{::lifecycle/ready ::lifecycle/stopped}
+                     (lifecycle/phase @observations))
         (do
-          (observe! observations emit ::lifecycle/stop-requested)
-          nil)
+          (when (= ::lifecycle/ready (lifecycle/phase @observations))
+            (observe! observations emit ::lifecycle/stop-requested))
+          (lifecycle/primary-anomaly @observations))
         (do
           (observe! observations emit ::lifecycle/stop-requested)
           (try

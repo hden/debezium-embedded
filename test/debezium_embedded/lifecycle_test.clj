@@ -45,6 +45,17 @@
     (is (false? (:protocol-violation? first-result)))
     (is (true? (:protocol-violation? second-result)))))
 
+(deftest connector-cannot-start-before-engine-invocation
+  (let [trace (lifecycle/append-observation
+               [::lifecycle/start-requested]
+               ::lifecycle/connector-started)]
+    (is (= [::lifecycle/start-requested
+            ::lifecycle/connector-started
+            ::lifecycle/protocol-anomaly]
+           (mapv #(if (keyword? %) % (:observation %)) trace)))
+    (is (= ::lifecycle/connector-started
+           (:observation/value (last trace))))))
+
 (deftest literal-traces-project-to-normal-phases
   (doseq [{:keys [trace expected-phase]}
           [{:trace          []

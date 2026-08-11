@@ -32,8 +32,9 @@
 (defn- never-allowed? [_projection _observation]
   false)
 
-(defn- connector-not-started? [projection _observation]
-  (= ::not-started (:connector projection)))
+(defn- connector-start-allowed? [projection _observation]
+  (and (= ::invoked (:engine projection))
+       (= ::not-started (:connector projection))))
 
 (defn- connector-started? [projection _observation]
   (= ::started (:connector projection)))
@@ -194,7 +195,8 @@
           (phase-entries [::starting ::capturing ::stopping] [::stop-requested]
                          (interpretation always-allowed? begin-stopping))
           (phase-entries [::starting] [::connector-started]
-                         (interpretation connector-not-started? record-connector-start))
+                         (interpretation connector-start-allowed?
+                                         record-connector-start))
           (phase-entries [::starting ::capturing ::stopping] [::connector-stopped]
                          (interpretation connector-started? record-connector-stop))
           (phase-entries [::starting] [::polling-started]

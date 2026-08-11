@@ -62,3 +62,14 @@
               {:cognitect.anomalies/category :cognitect.anomalies/fault
                :cognitect.anomalies/message  "Lifecycle anomaly"})))
         observations))
+
+(defn- observation-count [observations kind]
+  (count (filter #(= kind (observation-kind %)) observations)))
+
+(defn graceful-completion? [observations]
+  (and (some #(= ::completion-observed (observation-kind %)) observations)
+       (nil? (primary-anomaly observations))
+       (<= (observation-count observations ::batch-admitted)
+           (observation-count observations ::batch-acknowledged))
+       (<= (observation-count observations ::connector-started)
+           (observation-count observations ::connector-stopped))))

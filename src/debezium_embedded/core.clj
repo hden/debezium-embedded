@@ -196,7 +196,10 @@
                                         :cognitect.anomalies/message  "Engine shutdown failed"
                                         :debezium-embedded/cause      cause})))
           (if (deref (.-completion handle) timeout-ms ::timed-out)
-            (lifecycle/primary-anomaly @observations)
+            (or (lifecycle/primary-anomaly @observations)
+                (when-not (lifecycle/graceful-completion? @observations)
+                  {:cognitect.anomalies/category :cognitect.anomalies/fault
+                   :cognitect.anomalies/message  "Engine completion lacks graceful-shutdown evidence"}))
             (let [anomaly {:cognitect.anomalies/category :cognitect.anomalies/unavailable
                            :cognitect.anomalies/message  "Engine shutdown remained unconfirmed"}]
               (swap! observations conj (assoc anomaly :observation ::lifecycle/shutdown-unconfirmed))

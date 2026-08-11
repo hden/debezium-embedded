@@ -16,21 +16,6 @@
       (and (map? observation)
            (contains? observation :cognitect.anomalies/category))))
 
-(defn- next-phase [phase observation]
-  (let [kind (observation-kind observation)]
-    (cond
-      (= phase ::stopped) ::stopped
-      (= kind ::engine-submission-anomaly) ::stopped
-      (= kind ::engine-invocation-cancelled) ::stopped
-      (= kind ::completion-observed) ::stopped
-      (anomaly-observation? observation) (if (= phase ::ready) ::stopped ::stopping)
-      (= kind ::start-requested) (if (= phase ::ready) ::starting phase)
-      (= kind ::stop-requested) (if (= phase ::ready) ::stopped ::stopping)
-      (= kind ::connector-stopped) (if (= phase ::ready) ::stopped ::stopping)
-      (= kind ::polling-started) (if (= phase ::starting) ::capturing phase)
-      (= kind ::polling-stopped) (if (= phase ::capturing) ::stopping phase)
-      :else phase)))
-
 (def ^:private initial-projection
   {:phase       ::ready
    :engine      ::not-invoked
@@ -41,49 +26,223 @@
    :protocol?   false
    :batches     {:admitted 0 :acknowledged 0}})
 
-(defn- interpret [projection observation]
-  (let [kind (observation-kind observation)]
-    (cond-> (assoc projection :phase (next-phase (:phase projection) observation))
-      (= kind ::engine-invocation-started)
-      (assoc :engine ::invoked)
+(defn- always-allowed? [_projection _observation]
+  true)
 
-      (= kind ::engine-invocation-cancelled)
-      (assoc :engine ::cancelled)
+(defn- never-allowed? [_projection _observation]
+  false)
 
-      (= kind ::engine-submission-anomaly)
-      (assoc :engine ::rejected)
+(defn- connector-not-started? [projection _observation]
+  (= ::not-started (:connector projection)))
 
-      (= kind ::connector-started)
-      (assoc :connector ::started)
+(defn- connector-started? [projection _observation]
+  (= ::started (:connector projection)))
 
-      (= kind ::connector-stopped)
-      (assoc :connector ::stopped)
+(defn- initial-polling-ready? [projection _observation]
+  (and (= ::invoked (:engine projection))
+       (= ::started (:connector projection))
+       (= ::not-started (:polling projection))))
 
-      (= kind ::polling-started)
-      (assoc :polling ::started)
+(defn- retry-polling-ready? [projection observation]
+  (and (initial-polling-ready? projection observation)
+       (true? (get-in projection [:shutdown :failed?]))))
 
-      (= kind ::polling-stopped)
-      (assoc :polling ::stopped)
+(defn- polling-started? [projection _observation]
+  (= ::started (:polling projection)))
 
-      (= kind ::shutdown-request-started)
-      (update-in [:shutdown :requests] inc)
+(defn- completion-pending? [projection _observation]
+  (= ::pending (:completion projection)))
 
-      (= kind ::shutdown-anomaly)
-      (assoc-in [:shutdown :failed?] true)
+(defn- retain-projection [projection _observation]
+  projection)
 
-      (= kind ::completion-observed)
-      (assoc :completion (if (anomaly-observation? observation)
-                           ::failed
-                           ::succeeded))
+(defn- begin-starting [projection _observation]
+  (assoc projection :phase ::starting))
 
-      (= kind ::protocol-anomaly)
-      (assoc :protocol? true)
+(defn- stop-immediately [projection _observation]
+  (assoc projection :phase ::stopped))
 
-      (= kind ::batch-admitted)
-      (update-in [:batches :admitted] inc)
+(defn- begin-stopping [projection _observation]
+  (assoc projection :phase ::stopping))
 
-      (= kind ::batch-acknowledged)
-      (update-in [:batches :acknowledged] inc))))
+(defn- record-engine-invocation [projection _observation]
+  (assoc projection :engine ::invoked))
+
+(defn- record-engine-cancellation [projection _observation]
+  (assoc projection :phase ::stopped :engine ::cancelled))
+
+(defn- record-engine-rejection [projection _observation]
+  (assoc projection :phase ::stopped :engine ::rejected))
+
+(defn- record-connector-start [projection _observation]
+  (assoc projection :connector ::started))
+
+(defn- record-connector-stop [projection _observation]
+  (assoc projection :phase ::stopping :connector ::stopped))
+
+(defn- record-initial-polling-start [projection _observation]
+  (assoc projection :phase ::capturing :polling ::started))
+
+(defn- record-retry-polling-start [projection _observation]
+  (assoc projection :polling ::started))
+
+(defn- record-polling-stop [projection _observation]
+  (assoc projection :phase ::stopping :polling ::stopped))
+
+(defn- record-shutdown-request [projection _observation]
+  (update-in projection [:shutdown :requests] inc))
+
+(defn- record-terminal-shutdown-anomaly [projection _observation]
+  (-> projection
+      (assoc :phase ::stopped)
+      (assoc-in [:shutdown :failed?] true)))
+
+(defn- record-stopping-shutdown-anomaly [projection _observation]
+  (-> projection
+      (assoc :phase ::stopping)
+      (assoc-in [:shutdown :failed?] true)))
+
+(defn- record-terminal-anomaly [projection _observation]
+  (assoc projection :phase ::stopped))
+
+(defn- record-stopping-anomaly [projection _observation]
+  (assoc projection :phase ::stopping))
+
+(defn- record-completion [projection observation]
+  (assoc projection
+         :phase ::stopped
+         :completion (if (anomaly-observation? observation)
+                       ::failed
+                       ::succeeded)))
+
+(defn- record-batch-admission [projection _observation]
+  (update-in projection [:batches :admitted] inc))
+
+(defn- record-batch-acknowledgement [projection _observation]
+  (update-in projection [:batches :acknowledged] inc))
+
+(defn- record-terminal-protocol-rejection [projection _observation]
+  (assoc projection :phase ::stopped :protocol? true))
+
+(defn- record-stopping-protocol-rejection [projection _observation]
+  (assoc projection :phase ::stopping :protocol? true))
+
+(defn- record-rejected-completion [projection observation]
+  (assoc (record-completion projection observation) :protocol? true))
+
+(defn- interpretation [guard update]
+  {:guard guard :update update})
+
+(defn- rejected-interpretation [guard update]
+  {:guard guard :update update :protocol-violation? true})
+
+(def ^:private active-phases
+  [::ready ::starting ::capturing ::stopping])
+
+(def ^:private benign-observation-kinds
+  [::engine-submission-started
+   ::shutdown-returned
+   ::batch-handled
+   ::record-acknowledgement-started
+   ::record-acknowledged
+   ::batch-acknowledgement-started])
+
+(defn- phase-entries [phases observation-kinds entry]
+  (for [phase phases
+        observation-kind observation-kinds]
+    [[phase observation-kind] entry]))
+
+(def ^:private interpretation-table
+  (into {}
+        (concat
+          (phase-entries active-phases benign-observation-kinds
+                         (interpretation always-allowed? retain-projection))
+          (phase-entries active-phases [::engine-invocation-started]
+                         (interpretation always-allowed? record-engine-invocation))
+          (phase-entries active-phases [::engine-invocation-cancelled]
+                         (interpretation always-allowed? record-engine-cancellation))
+          (phase-entries active-phases [::engine-submission-anomaly]
+                         (interpretation always-allowed? record-engine-rejection))
+          (phase-entries active-phases [::shutdown-request-started]
+                         (interpretation always-allowed? record-shutdown-request))
+          (phase-entries [::ready] [::shutdown-anomaly]
+                         (interpretation always-allowed?
+                                         record-terminal-shutdown-anomaly))
+          (phase-entries [::starting ::capturing ::stopping] [::shutdown-anomaly]
+                         (interpretation always-allowed?
+                                         record-stopping-shutdown-anomaly))
+          (phase-entries [::ready]
+                         [::consumer-anomaly
+                          ::acknowledgement-anomaly
+                          ::shutdown-unconfirmed]
+                         (interpretation always-allowed? record-terminal-anomaly))
+          (phase-entries [::starting ::capturing ::stopping]
+                         [::consumer-anomaly
+                          ::acknowledgement-anomaly
+                          ::shutdown-unconfirmed]
+                         (interpretation always-allowed? record-stopping-anomaly))
+          (phase-entries active-phases [::batch-admitted]
+                         (interpretation always-allowed? record-batch-admission))
+          (phase-entries active-phases [::batch-acknowledged]
+                         (interpretation always-allowed? record-batch-acknowledgement))
+          (phase-entries [::ready] [::start-requested]
+                         (interpretation always-allowed? begin-starting))
+          (phase-entries [::starting ::capturing ::stopping] [::start-requested]
+                         (interpretation always-allowed? retain-projection))
+          (phase-entries [::ready] [::stop-requested]
+                         (interpretation always-allowed? stop-immediately))
+          (phase-entries [::starting ::capturing ::stopping] [::stop-requested]
+                         (interpretation always-allowed? begin-stopping))
+          (phase-entries [::starting] [::connector-started]
+                         (interpretation connector-not-started? record-connector-start))
+          (phase-entries [::starting ::capturing ::stopping] [::connector-stopped]
+                         (interpretation connector-started? record-connector-stop))
+          (phase-entries [::starting] [::polling-started]
+                         (interpretation initial-polling-ready?
+                                         record-initial-polling-start))
+          (phase-entries [::stopping] [::polling-started]
+                         (interpretation retry-polling-ready?
+                                         record-retry-polling-start))
+          (phase-entries [::capturing ::stopping] [::polling-stopped]
+                         (interpretation polling-started? record-polling-stop))
+          (phase-entries [::stopping] [::completion-observed]
+                         (interpretation completion-pending? record-completion))
+          (phase-entries [::ready ::starting ::capturing ::stopped]
+                         [::completion-observed]
+                         (rejected-interpretation completion-pending?
+                                                  record-rejected-completion))
+          (phase-entries [::ready ::stopped] [::protocol-anomaly]
+                         (interpretation always-allowed?
+                                         record-terminal-protocol-rejection))
+          (phase-entries [::starting ::capturing ::stopping] [::protocol-anomaly]
+                         (interpretation always-allowed?
+                                         record-stopping-protocol-rejection))
+          (phase-entries [::ready ::stopped] [::unrecognized-observation]
+                         (interpretation never-allowed?
+                                         record-terminal-protocol-rejection))
+          (phase-entries [::starting ::capturing ::stopping]
+                         [::unrecognized-observation]
+                         (interpretation never-allowed?
+                                         record-stopping-protocol-rejection)))))
+
+(defn- interpret-observation [projection observation]
+  (let [phase          (:phase projection)
+        interpretation (get interpretation-table
+                            [phase (observation-kind observation)])
+        fallback       (get interpretation-table
+                            [phase ::unrecognized-observation])
+        allowed?       (and interpretation
+                            ((:guard interpretation) projection observation))
+        update         (:update (if allowed? interpretation fallback))]
+    {:projection (update projection observation)
+     :protocol-violation? (or (:protocol-violation? interpretation)
+                              (not allowed?))}))
+
+(defn- interpret
+  ([observations]
+   (reduce interpret initial-projection observations))
+  ([projection observation]
+   (:projection (interpret-observation projection observation))))
 
 (defn- protocol-anomaly [observation]
   {:observation                  ::protocol-anomaly
@@ -91,57 +250,17 @@
    :cognitect.anomalies/message  "Unexpected lifecycle observation"
    :observation/value            observation})
 
-(defn- protocol-violation? [phase-before seen-kinds observation]
-  (let [kind         (observation-kind observation)
-        seen?        #(contains? seen-kinds %)]
-    (or (and (= kind ::completion-observed)
-             (contains? #{::ready ::starting ::capturing} phase-before))
-        (and (= kind ::connector-started)
-             (or (not= phase-before ::starting)
-                 (seen? ::connector-started)
-                 (seen? ::connector-stopped)))
-        (and (= kind ::connector-stopped)
-             (or (not (seen? ::connector-started))
-                 (seen? ::connector-stopped)))
-        (and (= kind ::polling-started)
-             (or (not (or (= phase-before ::starting)
-                        (and (= phase-before ::stopping)
-                             (seen? ::shutdown-anomaly))))
-                 (not (seen? ::engine-invocation-started))
-                 (not (seen? ::connector-started))
-                 (seen? ::connector-stopped)
-                 (seen? ::polling-started)))
-        (and (= kind ::polling-stopped)
-             (or (not (contains? #{::capturing ::stopping} phase-before))
-                 (seen? ::polling-stopped)))
-        (and (= phase-before ::stopped)
-             (not= kind ::protocol-anomaly)))))
-
-(defn- phase-and-seen-kinds [observations]
-  (loop [phase-before ::ready
-         seen-kinds    #{}
-         remaining    (seq observations)]
-    (if-let [observation (first remaining)]
-      (let [phase-after (next-phase phase-before observation)
-            phase       (if (protocol-violation? phase-before seen-kinds observation)
-                          (if (= phase-after ::stopped)
-                            ::stopped
-                            ::stopping)
-                          phase-after)]
-        (recur phase (conj seen-kinds (observation-kind observation))
-               (next remaining)))
-      [phase-before seen-kinds])))
-
 (defn phase [observations]
-  (first (phase-and-seen-kinds observations)))
+  (:phase (interpret observations)))
 
 (defn admitting? [observations]
   (= ::capturing (phase observations)))
 
 (defn append-observation [observations observation]
-  (let [[phase-before seen-kinds] (phase-and-seen-kinds observations)
-        with-observation          (conj observations observation)]
-    (if (protocol-violation? phase-before seen-kinds observation)
+  (let [projection       (interpret observations)
+        interpretation   (interpret-observation projection observation)
+        with-observation (conj observations observation)]
+    (if (:protocol-violation? interpretation)
       (conj with-observation (protocol-anomaly observation))
       with-observation)))
 

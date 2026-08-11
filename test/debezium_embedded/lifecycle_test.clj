@@ -28,6 +28,23 @@
             :completion ::lifecycle/succeeded}
            (select-keys projection [:phase :engine :connector :polling :completion])))))
 
+(deftest polling-stop-interpretation
+  (let [stopping-projection (assoc @#'lifecycle/initial-projection
+                                   :phase ::lifecycle/stopping
+                                   :polling ::lifecycle/started)
+        first-result        (#'lifecycle/interpret-observation
+                              stopping-projection
+                              ::lifecycle/polling-stopped)
+        first-projection    (:projection first-result)
+        second-result       (#'lifecycle/interpret-observation
+                              first-projection
+                              ::lifecycle/polling-stopped)]
+    (is (= {:phase   ::lifecycle/stopping
+            :polling ::lifecycle/stopped}
+           (select-keys first-projection [:phase :polling])))
+    (is (false? (:protocol-violation? first-result)))
+    (is (true? (:protocol-violation? second-result)))))
+
 (deftest literal-traces-project-to-normal-phases
   (doseq [{:keys [trace expected-phase]}
           [{:trace          []

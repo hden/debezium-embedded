@@ -67,6 +67,20 @@
             :debezium-embedded.core/observation ::lifecycle/start-requested}
            (deref events 1000 ::timed-out)))))
 
+(deftest polling-start-retries-a-rejected-startup-shutdown-once
+  (let [observations (atom [::lifecycle/start-requested
+                            ::lifecycle/run-submitted
+                            ::lifecycle/stop-requested
+                            ::lifecycle/shutdown-anomaly])
+        retries      (atom 0)
+        callback     (#'debezium-embedded.core/connector-callback
+                       observations
+                       nil
+                       #(swap! retries inc))]
+    (.pollingStarted callback)
+    (.pollingStarted callback)
+    (is (= 1 @retries))))
+
 (deftest source-records-keep-the-existing-event-map-shape
   (let [record (org.apache.kafka.connect.source.SourceRecord.
                  {"server" "postgres"}

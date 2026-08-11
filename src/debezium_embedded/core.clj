@@ -116,16 +116,23 @@
         (observe! observations emit observation)
         (deliver completion true)))))
 
-(defn- connector-callback [observations emit]
-  (reify DebeziumEngine$ConnectorCallback
-    (connectorStarted [_]
-      (observe! observations emit ::lifecycle/connector-started))
-    (connectorStopped [_]
-      (observe! observations emit ::lifecycle/connector-stopped))
-    (pollingStarted [_]
-      (observe! observations emit ::lifecycle/polling-started))
-    (pollingStopped [_]
-      (observe! observations emit ::lifecycle/polling-stopped))))
+(defn- connector-callback [observations emit retry-shutdown!]
+  (let [retry? (atom true)]
+    (reify DebeziumEngine$ConnectorCallback
+      (connectorStarted [_]
+        (observe! observations emit ::lifecycle/connector-started))
+      (connectorStopped [_]
+        (observe! observations emit ::lifecycle/connector-stopped))
+      (pollingStarted [_]
+        (observe! observations emit ::lifecycle/polling-started)
+        (when (and (some #(or (= ::lifecycle/shutdown-anomaly %)
+                              (= ::lifecycle/shutdown-anomaly (:observation %)))
+                         @observations)
+                   (= ::lifecycle/stopping (lifecycle/phase @observations))
+                   (compare-and-set! retry? true false))
+          (retry-shutdown!)))
+      (pollingStopped [_]
+        (observe! observations emit ::lifecycle/polling-stopped)))))
 
 (defn create-engine [arg-map]
   (let [config                      (::config arg-map)
@@ -140,12 +147,16 @@
             completion   (promise)
             dispatcher   (event-dispatcher (::on-event arg-map))
             emit         (:emit dispatcher)
+            engine-ref   (atom nil)
+            retry-shutdown! #(when-let [engine @engine-ref]
+                               (.close ^Closeable engine))
             engine       (-> (DebeziumEngine/create (ChangeEventFormat/of Connect))
                            (.using (map->properties config))
                            (.notifying (batch-consumer observations emit consumer))
                            (.using (completion-callback observations emit completion))
-                           (.using (connector-callback observations emit))
+                           (.using (connector-callback observations emit retry-shutdown!))
                            (.build))]
+        (reset! engine-ref engine)
         (CaptureHandle. engine observations completion dispatcher default-shutdown-timeout-ms)))))
 
 (defn- fault [message cause]

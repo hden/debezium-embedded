@@ -47,8 +47,8 @@
 
 (deftest connector-cannot-start-before-engine-invocation
   (let [trace (lifecycle/append-observation
-               [::lifecycle/start-requested]
-               ::lifecycle/connector-started)]
+                [::lifecycle/start-requested]
+                ::lifecycle/connector-started)]
     (is (= [::lifecycle/start-requested
             ::lifecycle/connector-started
             ::lifecycle/protocol-anomaly]
@@ -122,20 +122,20 @@
              (:observation/value (last trace))))
       (is (= 1 (count (filter #(= ::lifecycle/protocol-anomaly
                                   (:observation %))
-                             trace))))))
+                        trace))))))
   (doseq [observation [::lifecycle/engine-submission-started
-                      ::lifecycle/engine-invocation-started
-                      ::lifecycle/connector-started
-                      ::lifecycle/polling-started
-                      ::lifecycle/stop-requested
-                      ::lifecycle/polling-stopped
-                      ::lifecycle/connector-stopped
-                      ::lifecycle/completion-observed
-                      ::lifecycle/engine-invocation-cancelled]]
+                       ::lifecycle/engine-invocation-started
+                       ::lifecycle/connector-started
+                       ::lifecycle/polling-started
+                       ::lifecycle/stop-requested
+                       ::lifecycle/polling-stopped
+                       ::lifecycle/connector-stopped
+                       ::lifecycle/completion-observed
+                       ::lifecycle/engine-invocation-cancelled]]
     (let [trace (lifecycle/append-observation
-                 [::lifecycle/start-requested
-                  ::lifecycle/engine-submission-anomaly]
-                 observation)]
+                  [::lifecycle/start-requested
+                   ::lifecycle/engine-submission-anomaly]
+                  observation)]
       (is (= observation (nth trace (- (count trace) 2))))
       (is (= ::lifecycle/protocol-anomaly
              (:observation (last trace))))
@@ -143,7 +143,7 @@
              (:observation/value (last trace))))
       (is (= 1 (count (filter #(= ::lifecycle/protocol-anomaly
                                   (:observation %))
-                             trace)))))))
+                        trace)))))))
 
 (deftest terminal-results-preserve-the-observed-outcome
   (let [failed-completion {:observation                  ::lifecycle/completion-observed
@@ -156,22 +156,22 @@
                            :cognitect.anomalies/category :cognitect.anomalies/fault
                            :debezium-embedded/cause      :submission-rejected}
         failed-trace      (lifecycle/append-observation
-                           [::lifecycle/start-requested
-                            ::lifecycle/engine-submission-started
-                            ::lifecycle/engine-invocation-started
-                            ::lifecycle/stop-requested]
-                           failed-completion)
+                            [::lifecycle/start-requested
+                             ::lifecycle/engine-submission-started
+                             ::lifecycle/engine-invocation-started
+                             ::lifecycle/stop-requested]
+                            failed-completion)
         successful-trace  (lifecycle/append-observation
-                           [::lifecycle/start-requested
-                            ::lifecycle/engine-submission-started
-                            ::lifecycle/engine-invocation-started
-                            ::lifecycle/connector-started
-                            ::lifecycle/polling-started
-                            ::lifecycle/stop-requested
-                            ::lifecycle/polling-stopped
-                            ::lifecycle/connector-stopped
-                            ::lifecycle/completion-observed]
-                           late-anomaly)
+                            [::lifecycle/start-requested
+                             ::lifecycle/engine-submission-started
+                             ::lifecycle/engine-invocation-started
+                             ::lifecycle/connector-started
+                             ::lifecycle/polling-started
+                             ::lifecycle/stop-requested
+                             ::lifecycle/polling-stopped
+                             ::lifecycle/connector-stopped
+                             ::lifecycle/completion-observed]
+                            late-anomaly)
         cancelled-trace   (-> [::lifecycle/start-requested
                                ::lifecycle/engine-submission-started
                                ::lifecycle/engine-invocation-cancelled]
@@ -196,6 +196,22 @@
     (is (nil? (lifecycle/terminal-anomaly successful-trace)))
     (is (nil? (lifecycle/terminal-anomaly cancelled-trace)))
     (is (true? (lifecycle/graceful-completion? graceful-trace)))))
+
+(deftest interpreter-retains-terminal-decision-evidence
+  (let [failure    {:observation                  ::lifecycle/completion-observed
+                    :cognitect.anomalies/category :cognitect.anomalies/fault
+                    :debezium-embedded/cause      :upstream-failure}
+        projection (reduce #'lifecycle/interpret
+                           @#'lifecycle/initial-projection
+                           [::lifecycle/start-requested
+                            ::lifecycle/engine-submission-started
+                            ::lifecycle/engine-invocation-started
+                            ::lifecycle/stop-requested
+                            failure])]
+    (is (= {:cognitect.anomalies/category :cognitect.anomalies/fault
+            :debezium-embedded/cause      :upstream-failure}
+           (:terminal-anomaly projection)))
+    (is (true? (:completion-observed? projection)))))
 
 (deftest normal-start-trace-becomes-capturing
   (is (= :debezium-embedded.lifecycle/ready

@@ -23,8 +23,37 @@
    :polling     ::not-started
    :shutdown    {:requests 0 :failed? false}
    :completion  ::pending
+   :completion-observed? false
+   :terminal-anomaly nil
    :protocol?   false
-   :batches     {:admitted 0 :acknowledged 0}})
+   :batches     {:admitted 0 :acknowledged 0}
+   :connectors  {:started 0 :stopped 0}})
+
+(defn- anomaly-value [observation]
+  (when (anomaly-observation? observation)
+    (if (map? observation)
+      (dissoc observation :observation)
+      {:cognitect.anomalies/category :cognitect.anomalies/fault
+       :cognitect.anomalies/message  "Lifecycle anomaly"})))
+
+(defn- completion-protocol-anomaly? [observation]
+  (and (= ::protocol-anomaly (observation-kind observation))
+       (= ::completion-observed (:observation/value observation))))
+
+(defn- successful-terminal-observed? [projection]
+  (or (= ::succeeded (:completion projection))
+      (= ::cancelled (:engine projection))))
+
+(defn- retain-terminal-anomaly [projection observation]
+  (if (:terminal-anomaly projection)
+    projection
+    (assoc projection :terminal-anomaly (anomaly-value observation))))
+
+(defn- record-anomaly [projection observation]
+  (if (and (successful-terminal-observed? projection)
+           (not (completion-protocol-anomaly? observation)))
+    projection
+    (retain-terminal-anomaly projection observation)))
 
 (defn- always-allowed? [_projection _observation]
   true)
@@ -72,8 +101,10 @@
 (defn- record-engine-cancellation [projection _observation]
   (assoc projection :phase ::stopped :engine ::cancelled))
 
-(defn- record-engine-rejection [projection _observation]
-  (assoc projection :phase ::stopped :engine ::rejected))
+(defn- record-engine-rejection [projection observation]
+  (-> projection
+      (assoc :phase ::stopped :engine ::rejected)
+      (record-anomaly observation)))
 
 (defn- record-connector-start [projection _observation]
   (assoc projection :connector ::started))
@@ -93,28 +124,35 @@
 (defn- record-shutdown-request [projection _observation]
   (update-in projection [:shutdown :requests] inc))
 
-(defn- record-terminal-shutdown-anomaly [projection _observation]
+(defn- record-terminal-shutdown-anomaly [projection observation]
   (-> projection
       (assoc :phase ::stopped)
-      (assoc-in [:shutdown :failed?] true)))
+      (assoc-in [:shutdown :failed?] true)
+      (record-anomaly observation)))
 
-(defn- record-stopping-shutdown-anomaly [projection _observation]
+(defn- record-stopping-shutdown-anomaly [projection observation]
   (-> projection
       (assoc :phase ::stopping)
-      (assoc-in [:shutdown :failed?] true)))
+      (assoc-in [:shutdown :failed?] true)
+      (record-anomaly observation)))
 
-(defn- record-terminal-anomaly [projection _observation]
-  (assoc projection :phase ::stopped))
+(defn- record-terminal-anomaly [projection observation]
+  (-> projection
+      (assoc :phase ::stopped)
+      (record-anomaly observation)))
 
-(defn- record-stopping-anomaly [projection _observation]
-  (assoc projection :phase ::stopping))
+(defn- record-stopping-anomaly [projection observation]
+  (-> projection
+      (assoc :phase ::stopping)
+      (record-anomaly observation)))
 
 (defn- record-completion [projection observation]
-  (assoc projection
-         :phase ::stopped
-         :completion (if (anomaly-observation? observation)
-                       ::failed
-                       ::succeeded)))
+  (let [failed? (anomaly-observation? observation)]
+    (cond-> (assoc projection
+                   :phase ::stopped
+                   :completion-observed? true
+                   :completion (if failed? ::failed ::succeeded))
+      failed? (record-anomaly observation))))
 
 (defn- record-batch-admission [projection _observation]
   (update-in projection [:batches :admitted] inc))
@@ -122,11 +160,36 @@
 (defn- record-batch-acknowledgement [projection _observation]
   (update-in projection [:batches :acknowledged] inc))
 
-(defn- record-terminal-protocol-rejection [projection _observation]
-  (assoc projection :phase ::stopped :protocol? true))
+(defn- record-connector-start-evidence [projection _observation]
+  (update-in projection [:connectors :started] inc))
 
-(defn- record-stopping-protocol-rejection [projection _observation]
-  (assoc projection :phase ::stopping :protocol? true))
+(defn- record-connector-stop-evidence [projection _observation]
+  (update-in projection [:connectors :stopped] inc))
+
+(defn- record-completion-evidence [projection _observation]
+  (assoc projection :completion-observed? true))
+
+(def ^:private evidence-recorders
+  {::batch-admitted        record-batch-admission
+   ::batch-acknowledged    record-batch-acknowledgement
+   ::connector-started     record-connector-start-evidence
+   ::connector-stopped     record-connector-stop-evidence
+   ::completion-observed   record-completion-evidence})
+
+(defn- record-observation-evidence [projection observation]
+  (if-let [recorder (get evidence-recorders (observation-kind observation))]
+    (recorder projection observation)
+    projection))
+
+(defn- record-terminal-protocol-rejection [projection observation]
+  (-> projection
+      (assoc :phase ::stopped :protocol? true)
+      (record-anomaly observation)))
+
+(defn- record-stopping-protocol-rejection [projection observation]
+  (-> projection
+      (assoc :phase ::stopping :protocol? true)
+      (record-anomaly observation)))
 
 (defn- record-rejected-completion [projection observation]
   (assoc (record-completion projection observation) :protocol? true))
@@ -183,9 +246,9 @@
                           ::shutdown-unconfirmed]
                          (interpretation always-allowed? record-stopping-anomaly))
           (phase-entries active-phases [::batch-admitted]
-                         (interpretation always-allowed? record-batch-admission))
+                         (interpretation always-allowed? retain-projection))
           (phase-entries active-phases [::batch-acknowledged]
-                         (interpretation always-allowed? record-batch-acknowledgement))
+                         (interpretation always-allowed? retain-projection))
           (phase-entries [::ready] [::start-requested]
                          (interpretation always-allowed? begin-starting))
           (phase-entries [::starting ::capturing ::stopping] [::start-requested]
@@ -228,7 +291,8 @@
                                          record-stopping-protocol-rejection)))))
 
 (defn- interpret-observation [projection observation]
-  (let [phase          (:phase projection)
+  (let [projection     (record-observation-evidence projection observation)
+        phase          (:phase projection)
         interpretation (get interpretation-table
                             [phase (observation-kind observation)])
         fallback       (get interpretation-table
@@ -266,48 +330,13 @@
       (conj with-observation (protocol-anomaly observation))
       with-observation)))
 
-(defn- anomaly-value [observation]
-  (when (anomaly-observation? observation)
-    (if (map? observation)
-      (dissoc observation :observation)
-      {:cognitect.anomalies/category :cognitect.anomalies/fault
-       :cognitect.anomalies/message  "Lifecycle anomaly"})))
-
-(defn- completion-protocol-anomaly? [observation]
-  (and (= ::protocol-anomaly (observation-kind observation))
-       (= ::completion-observed (:observation/value observation))))
-
-(defn- successful-terminal-observation? [observation]
-  (contains? #{::completion-observed ::engine-invocation-cancelled}
-             (observation-kind observation)))
-
 (defn terminal-anomaly [observations]
-  (loop [remaining                   (seq observations)
-         successful-terminal-seen?   false]
-    (when-let [observation (first remaining)]
-      (let [anomaly (anomaly-value observation)]
-        (cond
-          (and successful-terminal-seen?
-               (not (completion-protocol-anomaly? observation)))
-          (recur (next remaining) true)
-
-          (completion-protocol-anomaly? observation)
-          anomaly
-
-          anomaly
-          anomaly
-
-          (successful-terminal-observation? observation)
-          (recur (next remaining) true)
-
-          :else
-          (recur (next remaining) successful-terminal-seen?))))))
+  (:terminal-anomaly (interpret observations)))
 
 (defn graceful-completion? [observations]
-  (let [counts (frequencies (map observation-kind observations))]
-    (and (pos? (get counts ::completion-observed 0))
-      (nil? (terminal-anomaly observations))
-      (<= (get counts ::batch-admitted 0)
-          (get counts ::batch-acknowledged 0))
-      (<= (get counts ::connector-started 0)
-          (get counts ::connector-stopped 0)))))
+  (let [{:keys [completion-observed? terminal-anomaly batches connectors]}
+        (interpret observations)]
+    (and completion-observed?
+         (nil? terminal-anomaly)
+         (<= (:admitted batches) (:acknowledged batches))
+         (<= (:started connectors) (:stopped connectors)))))

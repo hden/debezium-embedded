@@ -1,18 +1,19 @@
-# Lifecycle Interpreter Finite-State Machine Implementation Plan
+# Finite Lifecycle Interpretation Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use
 > `superpowers:executing-plans` to execute this plan task-by-task. Steps use
 > checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** make the lifecycle interpreter a readable, deterministic finite-state
-machine without changing the public lifecycle contract.
+**Goal:** make lifecycle interpretation a readable, deterministic finite
+projection without changing the public lifecycle contract.
 
 **Architecture:** retain the append-only observation trace as the only mutable
-input. Replace its two overlapping branch systems with one private interpreter
-state and a transition table keyed by interpreted phase and observation kind.
-Each table entry performs one state update; an absent or rejected entry appends
-the existing derived protocol anomaly. `phase`, record admission, terminal
-anomaly, and graceful completion read the folded interpreter state.
+input. Replace its two overlapping branch systems with one private projection
+and an observation-interpretation table keyed by interpreted phase and
+observation kind. Each table entry returns a new projection; an absent or
+rejected entry appends the existing derived protocol anomaly. `phase`, record
+admission, terminal anomaly, and graceful completion read the folded
+projection. No lifecycle state is independently stored or managed.
 
 **Tech Stack:** Clojure 1.12, `clojure.test`, standard-clj, TLC. No new runtime
 dependency; in particular, do not add `core.match`.
@@ -22,8 +23,8 @@ dependency; in particular, do not add `core.match`.
 - Preserve every public function, map shape, observation keyword, and
   `stop!` result.
 - Preserve raw invalid callbacks followed by a derived protocol anomaly.
-- Keep lifecycle state private and derived only by folding the trace.
-- Match the state variables and permitted transitions in
+- Keep lifecycle interpretation private and derived only by folding the trace.
+- Match the finite interpretation variables and permitted transitions in
   `tla/EngineLifecycle.tla`.
 - Do not add a dependency merely to express control flow.
 
@@ -79,7 +80,7 @@ protocol anomaly, terminal anomaly, and graceful-completion result.
   git commit -m "test: characterize lifecycle interpreter traces"
   ```
 
-### Task 2: Introduce an explicit private interpreter state
+### Task 2: Introduce an explicit private interpretation projection
 
 **Files:**
 
@@ -88,7 +89,7 @@ protocol anomaly, terminal anomaly, and graceful-completion result.
 
 **Consumes:** literal trace cases from Task 1.
 
-**Produces:** private `initial-state` and `interpret` values. They contain
+**Produces:** private `initial-projection` and `interpret` values. They contain
 only the finite facts that alter a later wrapper decision:
 
 ```clojure
@@ -102,7 +103,7 @@ only the finite facts that alter a later wrapper decision:
  :batches     {:admitted 0 :acknowledged 0}}
 ```
 
-- [ ] **Step 1: Write a failing private-state test**
+- [ ] **Step 1: Write a failing private-projection test**
 
   Fold the normal shutdown trace and assert the hand-written terminal state:
 
@@ -120,23 +121,23 @@ only the finite facts that alter a later wrapper decision:
 
   Expected: FAIL because `interpret` does not yet exist.
 
-- [ ] **Step 3: Add `initial-state` and `interpret`**
+- [ ] **Step 3: Add `initial-projection` and `interpret`**
 
-  Fold observations with private data only. Do not modify public functions
-  yet. Derive phase from state only; do not retain a second mutable phase.
+  Fold observations into a private value only. Do not modify public functions
+  yet. Derive phase from the projection; do not retain a mutable phase.
 
 - [ ] **Step 4: Run the focused test**
 
   Expected: PASS.
 
-- [ ] **Step 5: Commit the state introduction**
+- [ ] **Step 5: Commit the projection introduction**
 
   ```sh
   git add src/debezium_embedded/lifecycle.clj test/debezium_embedded/lifecycle_test.clj
-  git commit -m "refactor: introduce lifecycle interpreter state"
+  git commit -m "refactor: introduce lifecycle interpretation"
   ```
 
-### Task 3: Make the transition table the only lifecycle decision point
+### Task 3: Make the observation-interpretation table the only decision point
 
 **Files:**
 
@@ -145,14 +146,15 @@ only the finite facts that alter a later wrapper decision:
 
 **Consumes:** `interpret` from Task 2.
 
-**Produces:** a private transition table and one `advance` function:
+**Produces:** a private interpretation table and one `interpret-observation`
+function:
 
 ```clojure
-(advance interpreter-state observation)
-;; => updated interpreter-state, or the state whose :protocol? records rejection
+(interpret-observation projection observation)
+;; => a new projection, whose :protocol? records rejection when applicable
 ```
 
-- [ ] **Step 1: Write a failing transition-table test**
+- [ ] **Step 1: Write a failing observation-interpretation test**
 
   Assert the first `polling-stopped` from `stopping` produces
   `{:polling ::stopped :phase ::stopping}` and a second one marks protocol
@@ -160,22 +162,23 @@ only the finite facts that alter a later wrapper decision:
 
 - [ ] **Step 2: Run the focused test**
 
-  Run: `lein test :only debezium-embedded.lifecycle-test/polling-stop-transition-table`
+  Run: `lein test :only debezium-embedded.lifecycle-test/polling-stop-interpretation`
 
   Expected: FAIL while the old branch system remains.
 
-- [ ] **Step 3: Implement the table and `advance`**
+- [ ] **Step 3: Implement the table and `interpret-observation`**
 
-  Key the table by `[(:phase state) observation-kind]`. Each recognised entry
-  is a small named state update. Its guard reads explicit state fields; it does
-  not rescan observations. Unknown events and rejected guards use the existing
-  protocol-anomaly path.
+  Key the table by `[(:phase projection) observation-kind]`. Each recognised
+  entry is a small named pure projection update. Its guard reads explicit
+  projection fields; it does not rescan observations. Unknown events and
+  rejected guards use the existing protocol-anomaly path.
 
 - [ ] **Step 4: Replace both old branch systems**
 
   Delete `next-phase`, `protocol-violation?`, and `phase-and-seen-kinds`.
   Make `phase` call `(:phase (interpret observations))`, and make
-  `append-observation` ask `advance` whether to append the derived anomaly.
+  `append-observation` ask `interpret-observation` whether to append the
+  derived anomaly.
 
 - [ ] **Step 5: Run all interpreter tests**
 
@@ -197,7 +200,7 @@ only the finite facts that alter a later wrapper decision:
 - Modify: `src/debezium_embedded/lifecycle.clj`
 - Test: `test/debezium_embedded/lifecycle_test.clj`
 
-**Consumes:** the completed transition table from Task 3.
+**Consumes:** the completed observation-interpretation table from Task 3.
 
 **Produces:** `terminal-anomaly` and `graceful-completion?` that use one
 interpreter fold and explicit aggregate evidence instead of independent trace
@@ -240,12 +243,12 @@ the Clojure interpreter, without changing the promised trace semantics.
 - [ ] **Step 1: Rename only model variables that no longer describe the FSM**
 
   Keep the finite quotient and its invariants. Do not add concrete trace
-  retention or Debezium-private state to TLC.
+  retention or Debezium-private implementation state to TLC.
 
 - [ ] **Step 2: Document the no-`core.match` choice**
 
-  State that the Clojure transition table is the implementation counterpart to
-  the TLA+ transition relation.
+  State that the Clojure observation-interpretation table is the implementation
+  counterpart to the TLA+ transition relation.
 
 - [ ] **Step 3: Run complete verification**
 

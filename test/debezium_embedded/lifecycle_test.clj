@@ -13,14 +13,18 @@
         [::lifecycle/connector-started
          ::lifecycle/polling-started]))
 
+(defn- interpret-trace [trace]
+  (reduce #'lifecycle/interpret
+          @#'lifecycle/initial-projection
+          trace))
+
 (deftest interprets-normal-shutdown
-  (let [projection (reduce #'lifecycle/interpret
-                           @#'lifecycle/initial-projection
-                           (into (capturing-trace)
-                                 [::lifecycle/stop-requested
-                                  ::lifecycle/polling-stopped
-                                  ::lifecycle/connector-stopped
-                                  ::lifecycle/completion-observed]))]
+  (let [projection (interpret-trace
+                     (into (capturing-trace)
+                           [::lifecycle/stop-requested
+                            ::lifecycle/polling-stopped
+                            ::lifecycle/connector-stopped
+                            ::lifecycle/completion-observed]))]
     (is (= {:phase      ::lifecycle/stopped
             :engine     ::lifecycle/invoked
             :connector  ::lifecycle/stopped
@@ -201,13 +205,12 @@
   (let [failure    {:observation                  ::lifecycle/completion-observed
                     :cognitect.anomalies/category :cognitect.anomalies/fault
                     :debezium-embedded/cause      :upstream-failure}
-        projection (reduce #'lifecycle/interpret
-                           @#'lifecycle/initial-projection
-                           [::lifecycle/start-requested
-                            ::lifecycle/engine-submission-started
-                            ::lifecycle/engine-invocation-started
-                            ::lifecycle/stop-requested
-                            failure])]
+        projection (interpret-trace
+                     [::lifecycle/start-requested
+                      ::lifecycle/engine-submission-started
+                      ::lifecycle/engine-invocation-started
+                      ::lifecycle/stop-requested
+                      failure])]
     (is (= {:cognitect.anomalies/category :cognitect.anomalies/fault
             :debezium-embedded/cause      :upstream-failure}
            (:terminal-anomaly projection)))

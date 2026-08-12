@@ -203,13 +203,15 @@
 (def ^:private active-phases
   [::ready ::starting ::capturing ::stopping])
 
-(def ^:private benign-observation-kinds
+(def ^:private phase-preserving-observation-kinds
   [::engine-submission-started
    ::shutdown-returned
    ::batch-handled
    ::record-acknowledgement-started
    ::record-acknowledged
-   ::batch-acknowledgement-started])
+   ::batch-acknowledgement-started
+   ::batch-admitted
+   ::batch-acknowledged])
 
 (defn- phase-entries [phases observation-kinds entry]
   (for [phase phases
@@ -219,7 +221,7 @@
 (def ^:private interpretation-table
   (into {}
         (concat
-          (phase-entries active-phases benign-observation-kinds
+          (phase-entries active-phases phase-preserving-observation-kinds
                          (interpretation always-allowed? retain-projection))
           (phase-entries active-phases [::engine-invocation-started]
                          (interpretation always-allowed? record-engine-invocation))
@@ -245,10 +247,6 @@
                           ::acknowledgement-anomaly
                           ::shutdown-unconfirmed]
                          (interpretation always-allowed? record-stopping-anomaly))
-          (phase-entries active-phases [::batch-admitted]
-                         (interpretation always-allowed? retain-projection))
-          (phase-entries active-phases [::batch-acknowledged]
-                         (interpretation always-allowed? retain-projection))
           (phase-entries [::ready] [::start-requested]
                          (interpretation always-allowed? begin-starting))
           (phase-entries [::starting ::capturing ::stopping] [::start-requested]
@@ -291,16 +289,17 @@
                                          record-stopping-protocol-rejection)))))
 
 (defn- interpret-observation [projection observation]
-  (let [projection     (record-observation-evidence projection observation)
-        phase          (:phase projection)
-        interpretation (get interpretation-table
-                            [phase (observation-kind observation)])
-        fallback       (get interpretation-table
-                            [phase ::unrecognized-observation])
-        allowed?       (and interpretation
-                            ((:guard interpretation) projection observation))
-        update         (:update (if allowed? interpretation fallback))]
-    {:projection (update projection observation)
+  (let [projection-with-evidence (record-observation-evidence projection observation)
+        phase                    (:phase projection-with-evidence)
+        interpretation           (get interpretation-table
+                                   [phase (observation-kind observation)])
+        fallback                 (get interpretation-table
+                                   [phase ::unrecognized-observation])
+        allowed?                 (and interpretation
+                                      ((:guard interpretation)
+                                       projection-with-evidence observation))
+        transition               (:update (if allowed? interpretation fallback))]
+    {:projection (transition projection-with-evidence observation)
      :protocol-violation? (or (:protocol-violation? interpretation)
                               (not allowed?))}))
 

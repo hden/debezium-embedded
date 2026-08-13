@@ -125,6 +125,10 @@
       (observe-callback! latest-event emit {:event ::connector-started}))
     (connectorStopped [_]
       (observe-callback! latest-event emit {:event ::connector-stopped}))
+    (taskStarted [_]
+      (observe-callback! latest-event emit {:event ::task-started}))
+    (taskStopped [_]
+      (observe-callback! latest-event emit {:event ::task-stopped}))
     (pollingStarted [_]
       (observe-callback! latest-event emit {:event ::polling-started}))
     (pollingStopped [_]

@@ -32,6 +32,10 @@
 (deftest connector-callback-replaces-the-latest-event
   (let [latest-event (atom nil)
         callback     (#'core/connector-callback latest-event nil)]
+    (.taskStarted callback)
+    (is (= {:event ::core/task-started} @latest-event))
+    (.taskStopped callback)
+    (is (= {:event ::core/task-stopped} @latest-event))
     (.pollingStarted callback)
     (is (= {:event ::core/polling-started} @latest-event))
     (.pollingStopped callback)

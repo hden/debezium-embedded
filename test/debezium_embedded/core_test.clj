@@ -20,7 +20,7 @@
 
 (defn- capture-handle [engine latest-event completion]
   (debezium_embedded.core.CaptureHandle.
-    engine latest-event completion nil (atom false) 100))
+    engine latest-event (promise) completion nil (atom false) (atom false) (atom false) 100))
 
 (deftest polling-is-derived-from-the-latest-debezium-callback
   (is (true? (core/polling?
@@ -31,7 +31,7 @@
 
 (deftest connector-callback-replaces-the-latest-event
   (let [latest-event (atom nil)
-        callback     (#'core/connector-callback latest-event nil)]
+        callback     (#'core/connector-callback latest-event nil (promise) (atom false) (constantly nil))]
     (.taskStarted callback)
     (is (= {:event ::core/task-started} @latest-event))
     (.taskStopped callback)
@@ -43,8 +43,9 @@
 
 (deftest completion-replaces-a-polling-event
   (let [latest-event (atom {:event ::core/polling-started})
+        start-result (promise)
         completion   (promise)
-        callback     (#'core/completion-callback latest-event nil completion)]
+        callback     (#'core/completion-callback latest-event nil start-result completion)]
     (.handle callback true "completed" nil)
     (is (= {:event ::core/completed :success? true} (core/latest-event
                                                       (capture-handle nil latest-event completion))))
@@ -53,8 +54,9 @@
 (deftest failed-completion-is-an-explicit-callback-fact
   (let [cause        (ex-info "upstream failed" {})
         latest-event (atom nil)
+        start-result (promise)
         completion   (promise)
-        callback     (#'core/completion-callback latest-event nil completion)]
+        callback     (#'core/completion-callback latest-event nil start-result completion)]
     (.handle callback false "connector failed" cause)
     (is (= {:event     ::core/completed
             :success?  false
@@ -82,32 +84,77 @@
     (is (instance? java.io.Closeable handle))
     (is (not (instance? Runnable handle)))))
 
-(deftest start-submits-the-engine-and-rejects-a-duplicate-start
-  (let [submitted (atom nil)
+(deftest start-waits-for-polling-and-rejects-a-duplicate-start
+  (let [submitted (promise)
         executor  (reify java.util.concurrent.Executor
                     (execute [_ runnable]
-                      (reset! submitted runnable)))
-        handle    (core/create-engine {::core/config   (ephemeral-postgres-config)
-                                       ::core/consumer (constantly nil)})]
-    (is (nil? (core/start! handle {:executor executor})))
-    (is (instance? Runnable @submitted))
+                      (deliver submitted runnable)))
+        handle    (capture-handle (reify Runnable (run [_])) (atom nil) (promise))
+        callback  (#'core/connector-callback (.-latest-event handle)
+                    nil
+                    (.-start-result handle)
+                    (.-stop-requested? handle)
+                    (constantly nil))
+        starting  (future (core/start! handle {:executor executor}))]
+    (is (instance? Runnable (deref submitted 1000 nil)))
     (is (= :cognitect.anomalies/incorrect
-           (:cognitect.anomalies/category (core/start! handle {:executor executor}))))))
+           (:cognitect.anomalies/category (core/start! handle {:executor executor}))))
+    (is (= ::pending (deref starting 100 ::pending)))
+    (.pollingStarted callback)
+    (is (nil? (deref starting 1000 ::timed-out)))
+    (is (true? (core/polling? handle)))))
 
 (deftest rejected-submission-leaves-the-handle-retryable
-  (let [submitted (atom nil)
+  (let [submitted (promise)
         rejecting (reify java.util.concurrent.Executor
                     (execute [_ _]
                       (throw (ex-info "rejected" {}))))
         accepting (reify java.util.concurrent.Executor
                     (execute [_ runnable]
-                      (reset! submitted runnable)))
-        handle    (core/create-engine {::core/config   (ephemeral-postgres-config)
-                                       ::core/consumer (constantly nil)})]
+                      (deliver submitted runnable)))
+        handle    (capture-handle (reify Runnable (run [_])) (atom nil) (promise))]
     (is (= :cognitect.anomalies/fault
            (:cognitect.anomalies/category (core/start! handle {:executor rejecting}))))
-    (is (nil? (core/start! handle {:executor accepting})))
-    (is (instance? Runnable @submitted))))
+    (let [starting (future (core/start! handle {:executor accepting}))]
+      (is (instance? Runnable (deref submitted 1000 nil)))
+      (deliver (.-start-result handle) {:event ::core/polling-started})
+      (is (nil? (deref starting 1000 ::timed-out))))))
+
+(deftest failed-start-is-returned-as-an-anomaly
+  (let [submitted (promise)
+        executor  (reify java.util.concurrent.Executor
+                    (execute [_ runnable]
+                      (deliver submitted runnable)))
+        cause     (ex-info "connector failed" {})
+        handle    (capture-handle (reify Runnable (run [_])) (atom nil) (promise))
+        callback  (#'core/completion-callback (.-latest-event handle)
+                    nil
+                    (.-start-result handle)
+                    (.-completion handle))
+        starting  (future (core/start! handle {:executor executor}))]
+    (is (instance? Runnable (deref submitted 1000 nil)))
+    (.handle callback false "connector failed" cause)
+    (is (= {:cognitect.anomalies/category :cognitect.anomalies/fault
+            :cognitect.anomalies/message  "connector failed"
+            :debezium-embedded/cause      cause}
+           (deref starting 1000 ::timed-out)))))
+
+(deftest completion-before-polling-is-returned-as-an-unavailable-start
+  (let [submitted (promise)
+        executor  (reify java.util.concurrent.Executor
+                    (execute [_ runnable]
+                      (deliver submitted runnable)))
+        handle    (capture-handle (reify Runnable (run [_])) (atom nil) (promise))
+        callback  (#'core/completion-callback (.-latest-event handle)
+                    nil
+                    (.-start-result handle)
+                    (.-completion handle))
+        starting  (future (core/start! handle {:executor executor}))]
+    (is (instance? Runnable (deref submitted 1000 nil)))
+    (.handle callback true "completed before polling" nil)
+    (is (= {:cognitect.anomalies/category :cognitect.anomalies/unavailable
+            :cognitect.anomalies/message  "Engine completed before polling started"}
+           (deref starting 1000 ::timed-out)))))
 
 (deftest stop-before-start-is-a-no-op
   (let [closed (atom false)
@@ -126,7 +173,60 @@
                                                     :success? true}))))
         handle     (capture-handle engine (atom {:event ::core/polling-started}) completion)]
     (reset! (.-started? handle) true)
+    (deliver (.-start-result handle) {:event ::core/polling-started})
     (is (nil? (core/stop! handle {:timeout-ms 100})))))
+
+(deftest stop-during-startup-closes-after-polling-starts
+  (let [completion   (promise)
+        close-count  (atom 0)
+        latest-event (atom nil)
+        engine       (reify java.io.Closeable
+                       (close [_]
+                         (swap! close-count inc)
+                         (deliver completion {:event ::core/completed
+                                              :success? true})))
+        handle       (capture-handle engine latest-event completion)
+        callback     (#'core/connector-callback latest-event
+                                                nil
+                                                (.-start-result handle)
+                                                (.-stop-requested? handle)
+                                                #(#'core/close-engine! engine
+                                                                       (.-shutdown-issued? handle)))
+        stop-requested (promise)]
+    (reset! (.-started? handle) true)
+    (add-watch (.-stop-requested? handle) ::stop-requested
+               (fn [_ _ _ requested?]
+                 (when requested?
+                   (deliver stop-requested true))))
+    (try
+      (let [stopping (future (core/stop! handle {:timeout-ms 1000}))]
+        (is (true? (deref stop-requested 1000 false)))
+        (is (zero? @close-count))
+        (.pollingStarted callback)
+        (is (nil? (deref stopping 1000 ::timed-out)))
+        (is (= 1 @close-count)))
+      (finally
+        (remove-watch (.-stop-requested? handle) ::stop-requested)))))
+
+(deftest stop-during-startup-applies-its-timeout-after-polling-starts
+  (let [completion   (promise)
+        latest-event (atom nil)
+        engine       (reify java.io.Closeable
+                       (close [_]
+                         (deliver completion {:event ::core/completed
+                                              :success? true})))
+        handle       (capture-handle engine latest-event completion)
+        callback     (#'core/connector-callback latest-event
+                                                nil
+                                                (.-start-result handle)
+                                                (.-stop-requested? handle)
+                                                #(#'core/close-engine! engine
+                                                                       (.-shutdown-issued? handle)))]
+    (reset! (.-started? handle) true)
+    (let [stopping (future (core/stop! handle {:timeout-ms 1}))]
+      (Thread/sleep 50)
+      (.pollingStarted callback)
+      (is (nil? (deref stopping 1000 ::timed-out))))))
 
 (deftest failed-completion-is-returned-as-an-anomaly
   (let [failure    {:event                        ::core/completed
@@ -150,10 +250,14 @@
                         (close [_]))
                       latest-event
                       (promise)
+                      (promise)
                       dispatcher
                       (atom true)
+                      (atom false)
+                      (atom false)
                       1)]
     (try
+      (deliver (.-start-result handle) {:event ::core/polling-started})
       (is (= :cognitect.anomalies/unavailable
              (:cognitect.anomalies/category (core/stop! handle {}))))
       (is (= {::core/event       ::core/event-observed

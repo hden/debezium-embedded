@@ -54,6 +54,13 @@ A Clojure wrapper for the Debezium embedded engine.
   (core/stop! engine {}))
 ```
 
+`start!` waits without a timeout until Debezium reports that polling has
+started or completes. A successful return therefore means that polling has
+started; completion before polling returns an anomaly. `stop!` requests
+shutdown and waits for Debezium's completion callback; it returns an anomaly
+when that callback reports failure or does not arrive before its configured
+timeout.
+
 ## Status and probes
 
 Debezium owns connector lifecycle. This wrapper retains only the most recent

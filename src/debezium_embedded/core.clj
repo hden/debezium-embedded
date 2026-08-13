@@ -13,7 +13,7 @@
 
 (declare stop!)
 
-(deftype CaptureHandle [engine latest-event completion event-dispatcher started? default-shutdown-timeout-ms]
+(deftype CaptureHandle [engine latest-event start-result completion event-dispatcher started? stop-requested? shutdown-issued? default-shutdown-timeout-ms]
   Closeable
   (close [this]
     (let [result (stop! this {})]
@@ -112,14 +112,19 @@
     {:event ::completed :success? true}
     (assoc (fault ::completed message error) :success? false)))
 
-(defn- completion-callback [latest-event emit completion]
+(defn- completion-callback [latest-event emit start-result completion]
   (reify DebeziumEngine$CompletionCallback
     (handle [_ success message error]
       (let [event (completion-event success message error)]
         (observe-callback! latest-event emit event)
+        (deliver start-result event)
         (deliver completion event)))))
 
-(defn- connector-callback [latest-event emit]
+(defn- close-engine! [engine shutdown-issued?]
+  (when (compare-and-set! shutdown-issued? false true)
+    (.close ^Closeable engine)))
+
+(defn- connector-callback [latest-event emit start-result stop-requested? request-shutdown!]
   (reify DebeziumEngine$ConnectorCallback
     (connectorStarted [_]
       (observe-callback! latest-event emit {:event ::connector-started}))
@@ -130,7 +135,17 @@
     (taskStopped [_]
       (observe-callback! latest-event emit {:event ::task-stopped}))
     (pollingStarted [_]
-      (observe-callback! latest-event emit {:event ::polling-started}))
+      (let [event {:event ::polling-started}]
+        (observe-callback! latest-event emit event)
+        (if @stop-requested?
+          (try
+            (request-shutdown!)
+            (deliver start-result event)
+            (catch Throwable cause
+              (let [shutdown-failure (fault ::shutdown-failed "Engine shutdown failed" cause)]
+                (emit! emit shutdown-failure)
+                (deliver start-result shutdown-failure))))
+          (deliver start-result event))))
     (pollingStopped [_]
       (observe-callback! latest-event emit {:event ::polling-stopped}))))
 
@@ -144,17 +159,34 @@
       (nil? (:offset.storage config)) (incorrect "Missing :offset.storage")
       :else
       (let [latest-event (atom nil)
+            start-result (promise)
             completion   (promise)
             dispatcher   (event-dispatcher (::on-event arg-map))
             emit         (:emit dispatcher)
+            stop-requested? (atom false)
+            shutdown-issued? (atom false)
+            engine-promise (promise)
+            request-shutdown! #(close-engine! @engine-promise shutdown-issued?)
             engine       (-> (DebeziumEngine/create (ChangeEventFormat/of Connect))
                            (.using (map->properties config))
                            (.notifying (batch-consumer emit consumer))
-                           (.using (completion-callback latest-event emit completion))
-                           (.using (connector-callback latest-event emit))
+                           (.using (completion-callback latest-event emit start-result completion))
+                           (.using (connector-callback latest-event emit start-result stop-requested? request-shutdown!))
                            (.build))]
-        (CaptureHandle. engine latest-event completion dispatcher (atom false)
-                        default-shutdown-timeout-ms)))))
+        (deliver engine-promise engine)
+        (CaptureHandle. engine latest-event start-result completion dispatcher (atom false)
+                        stop-requested? shutdown-issued? default-shutdown-timeout-ms)))))
+
+(defn- completion-anomaly [event]
+  (when-not (:success? event)
+    (dissoc event :event :success?)))
+
+(defn- start-anomaly [event]
+  (if (= ::polling-started (:event event))
+    nil
+    (or (completion-anomaly event)
+        {:cognitect.anomalies/category :cognitect.anomalies/unavailable
+         :cognitect.anomalies/message  "Engine completed before polling started"})))
 
 (defn start! [^CaptureHandle handle {:keys [executor]}]
   (let [executor (or executor (ForkJoinPool/commonPool))]
@@ -162,34 +194,45 @@
       (incorrect "Engine has already been started")
       (try
         (.execute ^Executor executor ^Runnable (.-engine handle))
-        nil
+        (start-anomaly @(.-start-result handle))
         (catch Throwable cause
           (let [event (fault ::engine-submission-failed "Engine submission failed" cause)]
             (reset! (.-started? handle) false)
+            (when @(.-stop-requested? handle)
+              (deliver (.-start-result handle) event))
             (emit! (:emit (.-event-dispatcher handle)) event)
             event))))))
 
-(defn- completion-anomaly [event]
-  (when-not (:success? event)
-    (dissoc event :event :success?)))
+(defn- await-completion [^CaptureHandle handle timeout-ms]
+  (let [event (deref (.-completion handle) timeout-ms ::timed-out)]
+    (if (= ::timed-out event)
+      (let [anomaly {:event                        ::shutdown-unconfirmed
+                     :cognitect.anomalies/category :cognitect.anomalies/unavailable
+                     :cognitect.anomalies/message  "Engine shutdown remained unconfirmed"}]
+        (emit! (:emit (.-event-dispatcher handle)) anomaly)
+        (dissoc anomaly :event))
+      (completion-anomaly event))))
 
 (defn stop! [^CaptureHandle handle {:keys [timeout-ms]}]
   (let [completion (.-completion handle)
+        start-result (.-start-result handle)
         timeout-ms (or timeout-ms (.-default-shutdown-timeout-ms handle))]
     (cond
       (not @(.-started? handle)) nil
       (realized? completion) (completion-anomaly @completion)
       :else
       (try
-        (.close ^Closeable (.-engine handle))
-        (let [event (deref completion timeout-ms ::timed-out)]
-          (if (= ::timed-out event)
-            (let [anomaly {:event                        ::shutdown-unconfirmed
-                           :cognitect.anomalies/category :cognitect.anomalies/unavailable
-                           :cognitect.anomalies/message  "Engine shutdown remained unconfirmed"}]
-              (emit! (:emit (.-event-dispatcher handle)) anomaly)
-              (dissoc anomaly :event))
-            (completion-anomaly event)))
+        (reset! (.-stop-requested? handle) true)
+        (if-not (realized? start-result)
+          (let [event @start-result]
+            (if (= ::polling-started (:event event))
+              (await-completion handle timeout-ms)
+              (start-anomaly event)))
+          (do
+            (when (polling? handle)
+              (close-engine! (.-engine handle)
+                             (.-shutdown-issued? handle)))
+            (await-completion handle timeout-ms)))
         (catch Throwable cause
           (let [event (fault ::shutdown-failed "Engine shutdown failed" cause)]
             (emit! (:emit (.-event-dispatcher handle)) event)

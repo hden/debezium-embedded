@@ -46,11 +46,48 @@ A Clojure wrapper for the Debezium embedded engine.
 ;; Use a durable OffsetBackingStore in production; this in-memory store is
 ;; appropriate only for ephemeral local runs.
 (with-open [engine (core/create-engine {::core/config config
-                                        ::core/consumer handle-events})]
+                                        ::core/consumer handle-events
+                                        ::core/on-event (fn [event]
+                                                          (prn event))})]
   (core/start! engine {})
   ;; ... application work ...
   (core/stop! engine {}))
 ```
+
+## Status and probes
+
+Debezium owns connector lifecycle. This wrapper retains only the most recent
+Debezium lifecycle or completion callback as an observed fact.
+
+`polling?` is a conservative readiness building block: it is true only when
+the most recent callback is `::polling-started`. It becomes false when a later
+callback reports `::polling-stopped` or `::completed`.
+
+```clojure
+(core/polling? engine)
+```
+
+`latest-event` exposes the fact so the application can define its own health
+policy. For example, an application might restart only after a failed Debezium
+completion, while treating an intentional successful shutdown as live:
+
+```clojure
+(let [{:keys [event success?]} (core/latest-event engine)]
+  (not (and (= event ::core/completed)
+            (false? success?))))
+```
+
+`::on-event` receives the same callback facts and wrapper-local consumer or
+acknowledgement failures asynchronously. Its value has this shape:
+
+```clojure
+{::core/event       ::core/event-observed
+ ::core/observation {:event ::core/polling-started}}
+```
+
+The wrapper deliberately does not prescribe readiness or liveness policy.
+Those policies decide traffic routing and restart behavior, which belong to
+the application and its orchestrator.
 
 ## Record Structure
 

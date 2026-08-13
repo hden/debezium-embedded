@@ -1,8 +1,7 @@
 (ns debezium-embedded.core-test
   (:require
    [clojure.test :refer [deftest is]]
-   [debezium-embedded.core :as core]
-   [debezium-embedded.lifecycle :as lifecycle]))
+   [debezium-embedded.core :as core]))
 
 (defn- ephemeral-postgres-config []
   {:name                     "capture"
@@ -19,33 +18,63 @@
    :offset.flush.interval.ms "0"
    :converter.schemas.enable "false"})
 
-(defn- started-engine-trace []
-  [::lifecycle/start-requested
-   ::lifecycle/engine-submission-started
-   ::lifecycle/engine-invocation-started])
+(defn- handle [engine latest-event completion]
+  (debezium_embedded.core.CaptureHandle.
+    engine latest-event completion nil (atom false) 100))
 
-(defn- capturing-trace []
-  (into (started-engine-trace)
-        [::lifecycle/connector-started
-         ::lifecycle/polling-started]))
+(deftest polling-is-derived-from-the-latest-debezium-callback
+  (is (true? (core/polling?
+               (handle nil (atom {:event ::core/polling-started}) (promise)))))
+  (is (false? (core/polling?
+                (handle nil (atom {:event ::core/polling-stopped}) (promise)))))
+  (is (false? (core/polling? (handle nil (atom nil) (promise))))))
+
+(deftest connector-callback-replaces-the-latest-event
+  (let [latest-event (atom nil)
+        callback     (#'core/connector-callback latest-event nil)]
+    (.pollingStarted callback)
+    (is (= {:event ::core/polling-started} @latest-event))
+    (.pollingStopped callback)
+    (is (= {:event ::core/polling-stopped} @latest-event))))
+
+(deftest completion-replaces-a-polling-event
+  (let [latest-event (atom {:event ::core/polling-started})
+        completion   (promise)
+        callback     (#'core/completion-callback latest-event nil completion)]
+    (.handle callback true "completed" nil)
+    (is (= {:event ::core/completed :success? true} (core/latest-event
+                                                      (handle nil latest-event completion))))
+    (is (false? (core/polling? (handle nil latest-event completion))))))
+
+(deftest failed-completion-is-an-explicit-callback-fact
+  (let [cause        (ex-info "upstream failed" {})
+        latest-event (atom nil)
+        completion   (promise)
+        callback     (#'core/completion-callback latest-event nil completion)]
+    (.handle callback false "connector failed" cause)
+    (is (= {:event     ::core/completed
+            :success?  false
+            :cognitect.anomalies/category :cognitect.anomalies/fault
+            :cognitect.anomalies/message  "connector failed"
+            :debezium-embedded/cause      cause}
+           @latest-event))))
 
 (deftest create-engine-requires-an-explicit-offset-store
-  (let [result (core/create-engine {::core/config   {:name "capture"}
-                                    ::core/consumer (constantly nil)})]
-    (is (= :cognitect.anomalies/incorrect
-           (:cognitect.anomalies/category result)))))
+  (is (= :cognitect.anomalies/incorrect
+         (:cognitect.anomalies/category
+           (core/create-engine {::core/config   {:name "capture"}
+                                ::core/consumer (constantly nil)})))))
 
 (deftest create-engine-requires-a-consumer
-  (let [result (core/create-engine {::core/config
-                                    {:name           "capture"
-                                     :offset.storage "example.OffsetStore"}})]
-    (is (= :cognitect.anomalies/incorrect
-           (:cognitect.anomalies/category result)))))
+  (is (= :cognitect.anomalies/incorrect
+         (:cognitect.anomalies/category
+           (core/create-engine {::core/config
+                                {:name           "capture"
+                                 :offset.storage "example.OffsetStore"}})))))
 
 (deftest create-engine-returns-an-opaque-closeable-handle
-  (let [handle (core/create-engine
-                 {::core/config   (ephemeral-postgres-config)
-                  ::core/consumer (constantly nil)})]
+  (let [handle (core/create-engine {::core/config   (ephemeral-postgres-config)
+                                    ::core/consumer (constantly nil)})]
     (is (instance? java.io.Closeable handle))
     (is (not (instance? Runnable handle)))))
 
@@ -58,131 +87,79 @@
                                        ::core/consumer (constantly nil)})]
     (is (nil? (core/start! handle {:executor executor})))
     (is (instance? Runnable @submitted))
-    (is (false? (core/running? handle)))))
+    (is (= :cognitect.anomalies/incorrect
+           (:cognitect.anomalies/category (core/start! handle {:executor executor}))))))
 
-(deftest queued-engine-invocation-does-not-begin-after-stop
-  (let [runs      (atom 0)
-        submitted (atom nil)
-        executor  (reify java.util.concurrent.Executor
+(deftest rejected-submission-leaves-the-handle-retryable
+  (let [submitted (atom nil)
+        rejecting (reify java.util.concurrent.Executor
+                    (execute [_ _]
+                      (throw (ex-info "rejected" {}))))
+        accepting (reify java.util.concurrent.Executor
                     (execute [_ runnable]
                       (reset! submitted runnable)))
-        engine    (reify Runnable
-                    (run [_] (swap! runs inc))
-                    java.io.Closeable
-                    (close [_]))
-        handle    (debezium_embedded.core.CaptureHandle.
-                    engine (atom []) (promise) nil 1)]
-    (is (nil? (core/start! handle {:executor executor})))
-    (core/stop! handle {:timeout-ms 1})
-    (.run ^Runnable @submitted)
-    (is (zero? @runs))
-    (is (= 1 (count (filter #{::lifecycle/engine-invocation-cancelled}
-                      @(.-observations handle)))))))
+        handle    (core/create-engine {::core/config   (ephemeral-postgres-config)
+                                       ::core/consumer (constantly nil)})]
+    (is (= :cognitect.anomalies/fault
+           (:cognitect.anomalies/category (core/start! handle {:executor rejecting}))))
+    (is (nil? (core/start! handle {:executor accepting})))
+    (is (instance? Runnable @submitted))))
 
-(deftest submission-failure-after-cancellation-is-diagnostic
-  (let [handle-ref (atom nil)
-        executor   (reify java.util.concurrent.Executor
-                     (execute [_ _]
-                       (core/stop! @handle-ref {})
-                       (throw (ex-info "executor rejected" {}))))
-        handle     (debezium_embedded.core.CaptureHandle.
-                     nil (atom []) (promise) nil 1)]
-    (reset! handle-ref handle)
-    (is (nil? (core/start! handle {:executor executor})))
-    (is (nil? (core/stop! handle {})))))
-
-(deftest stop-before-start-needs-no-upstream-shutdown
-  (let [handle (core/create-engine {::core/config   (ephemeral-postgres-config)
-                                    ::core/consumer (constantly nil)})]
-    (is (nil? (core/stop! handle {})))))
-
-(deftest close-is-idempotent-after-completion
-  (let [handle (debezium_embedded.core.CaptureHandle.
-                 nil
-                 (atom [::lifecycle/start-requested
-                        ::lifecycle/engine-submission-started
-                        ::lifecycle/engine-invocation-started
-                        ::lifecycle/stop-requested
-                        ::lifecycle/completion-observed])
-                 (promise)
-                 nil
-                 2000)]
+(deftest stop-before-start-is-a-no-op
+  (let [closed (atom false)
+        handle (handle (reify java.io.Closeable
+                         (close [_] (reset! closed true)))
+                       (atom nil)
+                       (promise))]
     (is (nil? (core/stop! handle {})))
-    (is (nil? (.close handle)))))
+    (is (false? @closed))))
 
-(deftest stop-does-not-block-an-asynchronous-completion-callback
-  (let [observations (atom (capturing-trace))
-        completion   (promise)
-        callback     (#'debezium-embedded.core/completion-callback
-                       observations nil completion)
-        engine       (reify java.io.Closeable
-                       (close [_]
-                         (future
-                           (#'debezium-embedded.core/observe!
-                             observations nil ::lifecycle/connector-stopped)
-                           (.handle callback true "completed" nil))))
-        handle       (debezium_embedded.core.CaptureHandle.
-                       engine observations completion nil 200)]
-    (is (nil? (core/stop! handle {:timeout-ms 100})))
-    (is (= ::lifecycle/stopped (lifecycle/phase @observations)))
-    (is (some #{::lifecycle/shutdown-request-started} @observations))
-    (is (some #{::lifecycle/shutdown-returned} @observations))))
+(deftest stop-waits-for-a-successful-debezium-completion
+  (let [completion (promise)
+        engine     (reify java.io.Closeable
+                     (close [_]
+                       (future (deliver completion {:event ::core/completed
+                                                    :success? true}))))
+        handle     (handle engine (atom {:event ::core/polling-started}) completion)]
+    (reset! (.-started? handle) true)
+    (is (nil? (core/stop! handle {:timeout-ms 100})))))
 
-(deftest shutdown-does-not-start-after-completion
-  (let [closed       (atom 0)
-        observations (atom (into (capturing-trace)
-                                 [::lifecycle/stop-requested
-                                  ::lifecycle/completion-observed]))
-        engine       (reify java.io.Closeable
-                       (close [_] (swap! closed inc)))]
-    (#'debezium-embedded.core/request-shutdown! observations nil engine)
-    (is (zero? @closed))))
+(deftest failed-completion-is-returned-as-an-anomaly
+  (let [failure    {:event                        ::core/completed
+                    :cognitect.anomalies/category :cognitect.anomalies/fault
+                    :cognitect.anomalies/message  "connector failed"
+                    :debezium-embedded/cause      :upstream}
+        completion (doto (promise) (deliver failure))
+        handle     (handle nil (atom failure) completion)]
+    (reset! (.-started? handle) true)
+    (is (= {:cognitect.anomalies/category :cognitect.anomalies/fault
+            :cognitect.anomalies/message  "connector failed"
+            :debezium-embedded/cause      :upstream}
+           (core/stop! handle {})))))
 
-(deftest anomaly-after-successful-completion-is-diagnostic
-  (let [observations (atom (conj (into (capturing-trace)
-                                   [::lifecycle/stop-requested
-                                    ::lifecycle/connector-stopped
-                                    ::lifecycle/completion-observed])
-                             {:observation                  ::lifecycle/shutdown-anomaly
-                              :cognitect.anomalies/category :cognitect.anomalies/fault}))
-        handle       (debezium_embedded.core.CaptureHandle.
-                       nil observations (doto (promise) (deliver true)) nil 1)]
-    (is (nil? (core/stop! handle {})))))
-
-(deftest event-hook-receives-wrapper-observations-asynchronously
-  (let [events      (atom [])
-        delivered?  (promise)
-        dispatcher  (#'debezium-embedded.core/event-dispatcher
-                      (fn [event]
-                        (swap! events conj (::core/observation event))
-                        (when (= 2 (count @events))
-                          (deliver delivered? true))))
-        observations (atom [])]
+(deftest unconfirmed-shutdown-is-observable-without-replacing-the-latest-callback
+  (let [delivered?  (promise)
+        dispatcher  (#'core/event-dispatcher #(deliver delivered? %))
+        latest-event (atom {:event ::core/polling-started})
+        handle      (debezium_embedded.core.CaptureHandle.
+                      (reify java.io.Closeable
+                        (close [_]))
+                      latest-event
+                      (promise)
+                      dispatcher
+                      (atom true)
+                      1)]
     (try
-      (#'debezium-embedded.core/observe!
-        observations (:emit dispatcher) ::lifecycle/start-requested)
-      (#'debezium-embedded.core/observe!
-        observations (:emit dispatcher) ::lifecycle/engine-submission-started)
-      (is (true? (deref delivered? 1000 false)))
-      (is (= [::lifecycle/start-requested
-              ::lifecycle/engine-submission-started]
-             @events))
+      (is (= :cognitect.anomalies/unavailable
+             (:cognitect.anomalies/category (core/stop! handle {}))))
+      (is (= {::core/event       ::core/event-observed
+              ::core/observation {:event                        ::core/shutdown-unconfirmed
+                                  :cognitect.anomalies/category :cognitect.anomalies/unavailable
+                                  :cognitect.anomalies/message  "Engine shutdown remained unconfirmed"}}
+             (deref delivered? 1000 nil)))
+      (is (= {:event ::core/polling-started} (core/latest-event handle)))
       (finally
         ((:shutdown dispatcher))))))
-
-(deftest polling-start-retries-a-rejected-startup-shutdown-once
-  (let [observations (atom (into (started-engine-trace)
-                                 [::lifecycle/connector-started
-                                  ::lifecycle/stop-requested
-                                  ::lifecycle/shutdown-anomaly]))
-        retries      (atom 0)
-        callback     (#'debezium-embedded.core/connector-callback
-                       observations
-                       nil
-                       #(swap! retries inc))]
-    (.pollingStarted callback)
-    (.pollingStarted callback)
-    (is (= 1 @retries))))
 
 (deftest source-records-keep-the-existing-event-map-shape
   (let [record (org.apache.kafka.connect.source.SourceRecord.
@@ -191,47 +168,12 @@
                  "test"
                  nil
                  nil)
-        event  (#'debezium-embedded.core/source-record->map record)]
+        event  (#'core/source-record->map record)]
     (is (= {:lsn 42} (:offset event)))
     (is (nil? (:value event)))))
 
 (deftest consumer-failure-does-not-acknowledge-a-batch
-  (let [observations (atom (capturing-trace))
-        acknowledgements (atom [])
-        committer (reify io.debezium.engine.DebeziumEngine$RecordCommitter
-                    (markProcessed [_ record]
-                      (swap! acknowledgements conj [:record record]))
-                    (markBatchFinished [_]
-                      (swap! acknowledgements conj :batch))
-                    (markProcessed [_ record _]
-                      (swap! acknowledgements conj [:record record]))
-                    (buildOffsets [_] nil))
-        consumer (#'debezium-embedded.core/batch-consumer
-                   observations
-                   nil
-                   (fn [_] (throw (ex-info "consumer failed" {}))))]
-    (is (thrown? clojure.lang.ExceptionInfo
-                 (.handleBatch consumer [] committer)))
-    (is (empty? @acknowledgements))
-    (is (= :cognitect.anomalies/fault
-           (:cognitect.anomalies/category
-             (lifecycle/terminal-anomaly @observations))))))
-
-(deftest handled-batch-is-finished-after-consumer-returns
-  (let [observations (atom (capturing-trace))
-        acknowledgements (atom [])
-        committer (reify io.debezium.engine.DebeziumEngine$RecordCommitter
-                    (markProcessed [_ _])
-                    (markBatchFinished [_] (swap! acknowledgements conj :batch))
-                    (markProcessed [_ _ _])
-                    (buildOffsets [_] nil))
-        consumer (#'debezium-embedded.core/batch-consumer observations nil (constantly nil))]
-    (.handleBatch consumer [] committer)
-    (is (= [:batch] @acknowledgements))))
-
-(deftest stop-recorded-by-the-consumer-forbids-later-acknowledgement
-  (let [observations     (atom (capturing-trace))
-        acknowledgements (atom [])
+  (let [acknowledgements (atom [])
         committer        (reify io.debezium.engine.DebeziumEngine$RecordCommitter
                            (markProcessed [_ record]
                              (swap! acknowledgements conj [:record record]))
@@ -240,25 +182,32 @@
                            (markProcessed [_ record _]
                              (swap! acknowledgements conj [:record record]))
                            (buildOffsets [_] nil))
-        consumer         (#'debezium-embedded.core/batch-consumer
-                           observations
-                           nil
-                           (fn [_]
-                             (#'debezium-embedded.core/observe!
-                               observations nil ::lifecycle/stop-requested)))]
-    (.handleBatch consumer [] committer)
-    (is (empty? @acknowledgements))
-    (is (false? (lifecycle/admitting? @observations)))))
-
-(deftest acknowledgement-failure-is-not-a-consumer-failure
-  (let [observations (atom (capturing-trace))
-        committer    (reify io.debezium.engine.DebeziumEngine$RecordCommitter
-                       (markProcessed [_ _])
-                       (markBatchFinished [_] (throw (ex-info "acknowledgement failed" {})))
-                       (markProcessed [_ _ _])
-                       (buildOffsets [_] nil))
-        consumer     (#'debezium-embedded.core/batch-consumer observations nil (constantly nil))]
+        consumer         (#'core/batch-consumer nil (fn [_] (throw (ex-info "failed" {}))))]
     (is (thrown? clojure.lang.ExceptionInfo
                  (.handleBatch consumer [] committer)))
-    (is (= ::lifecycle/acknowledgement-anomaly
-           (:observation (first (filter map? @observations)))))))
+    (is (empty? @acknowledgements))))
+
+(deftest consumer-success-is-acknowledged-after-it-returns
+  (let [events           (atom [])
+        committer        (reify io.debezium.engine.DebeziumEngine$RecordCommitter
+                           (markProcessed [_ _])
+                           (markBatchFinished [_] (swap! events conj :acknowledged))
+                           (markProcessed [_ _ _])
+                           (buildOffsets [_] nil))
+        consumer         (#'core/batch-consumer nil
+                           (fn [_] (swap! events conj :consumed)))]
+    (.handleBatch consumer [] committer)
+    (is (= [:consumed :acknowledged] @events))))
+
+(deftest event-hook-receives-observations-asynchronously
+  (let [delivered? (promise)
+        dispatcher (#'core/event-dispatcher
+                     (fn [event]
+                       (deliver delivered? event)))]
+    (try
+      ((:emit dispatcher) {:event ::core/polling-started})
+      (is (= {::core/event       ::core/event-observed
+              ::core/observation {:event ::core/polling-started}}
+             (deref delivered? 1000 nil)))
+      (finally
+        ((:shutdown dispatcher))))))

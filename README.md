@@ -77,8 +77,9 @@ completion, while treating an intentional successful shutdown as live:
             (false? success?))))
 ```
 
-`::on-event` receives the same callback facts and wrapper-local consumer or
-acknowledgement failures asynchronously. Its value has this shape:
+`::on-event` receives the same callback facts and wrapper-local failure events
+(including consumer, acknowledgement, submission, and shutdown failures)
+asynchronously. Its value has this shape:
 
 ```clojure
 {::core/event       ::core/event-observed

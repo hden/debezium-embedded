@@ -165,7 +165,7 @@
             (emit! (:emit (.-event-dispatcher handle)) event)
             event))))))
 
-(defn- completion-result [event]
+(defn- completion-anomaly [event]
   (when-not (:success? event)
     (dissoc event :event :success?)))
 
@@ -174,7 +174,7 @@
         timeout-ms (or timeout-ms (.-default-shutdown-timeout-ms handle))]
     (cond
       (not @(.-started? handle)) nil
-      (realized? completion) (completion-result @completion)
+      (realized? completion) (completion-anomaly @completion)
       :else
       (try
         (.close ^Closeable (.-engine handle))
@@ -185,7 +185,7 @@
                            :cognitect.anomalies/message  "Engine shutdown remained unconfirmed"}]
               (emit! (:emit (.-event-dispatcher handle)) anomaly)
               (dissoc anomaly :event))
-            (completion-result event)))
+            (completion-anomaly event)))
         (catch Throwable cause
           (let [event (fault ::shutdown-failed "Engine shutdown failed" cause)]
             (emit! (:emit (.-event-dispatcher handle)) event)

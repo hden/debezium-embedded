@@ -18,16 +18,16 @@
    :offset.flush.interval.ms "0"
    :converter.schemas.enable "false"})
 
-(defn- handle [engine latest-event completion]
+(defn- capture-handle [engine latest-event completion]
   (debezium_embedded.core.CaptureHandle.
     engine latest-event completion nil (atom false) 100))
 
 (deftest polling-is-derived-from-the-latest-debezium-callback
   (is (true? (core/polling?
-               (handle nil (atom {:event ::core/polling-started}) (promise)))))
+               (capture-handle nil (atom {:event ::core/polling-started}) (promise)))))
   (is (false? (core/polling?
-                (handle nil (atom {:event ::core/polling-stopped}) (promise)))))
-  (is (false? (core/polling? (handle nil (atom nil) (promise))))))
+                (capture-handle nil (atom {:event ::core/polling-stopped}) (promise)))))
+  (is (false? (core/polling? (capture-handle nil (atom nil) (promise))))))
 
 (deftest connector-callback-replaces-the-latest-event
   (let [latest-event (atom nil)
@@ -43,8 +43,8 @@
         callback     (#'core/completion-callback latest-event nil completion)]
     (.handle callback true "completed" nil)
     (is (= {:event ::core/completed :success? true} (core/latest-event
-                                                      (handle nil latest-event completion))))
-    (is (false? (core/polling? (handle nil latest-event completion))))))
+                                                      (capture-handle nil latest-event completion))))
+    (is (false? (core/polling? (capture-handle nil latest-event completion))))))
 
 (deftest failed-completion-is-an-explicit-callback-fact
   (let [cause        (ex-info "upstream failed" {})
@@ -78,7 +78,7 @@
     (is (instance? java.io.Closeable handle))
     (is (not (instance? Runnable handle)))))
 
-(deftest start-submits-the-private-engine-through-the-supplied-executor
+(deftest start-submits-the-engine-and-rejects-a-duplicate-start
   (let [submitted (atom nil)
         executor  (reify java.util.concurrent.Executor
                     (execute [_ runnable]
@@ -107,10 +107,10 @@
 
 (deftest stop-before-start-is-a-no-op
   (let [closed (atom false)
-        handle (handle (reify java.io.Closeable
-                         (close [_] (reset! closed true)))
-                       (atom nil)
-                       (promise))]
+        handle (capture-handle (reify java.io.Closeable
+                                 (close [_] (reset! closed true)))
+                 (atom nil)
+                 (promise))]
     (is (nil? (core/stop! handle {})))
     (is (false? @closed))))
 
@@ -120,7 +120,7 @@
                      (close [_]
                        (future (deliver completion {:event ::core/completed
                                                     :success? true}))))
-        handle     (handle engine (atom {:event ::core/polling-started}) completion)]
+        handle     (capture-handle engine (atom {:event ::core/polling-started}) completion)]
     (reset! (.-started? handle) true)
     (is (nil? (core/stop! handle {:timeout-ms 100})))))
 
@@ -130,7 +130,7 @@
                     :cognitect.anomalies/message  "connector failed"
                     :debezium-embedded/cause      :upstream}
         completion (doto (promise) (deliver failure))
-        handle     (handle nil (atom failure) completion)]
+        handle     (capture-handle nil (atom failure) completion)]
     (reset! (.-started? handle) true)
     (is (= {:cognitect.anomalies/category :cognitect.anomalies/fault
             :cognitect.anomalies/message  "connector failed"
@@ -138,8 +138,8 @@
            (core/stop! handle {})))))
 
 (deftest unconfirmed-shutdown-is-observable-without-replacing-the-latest-callback
-  (let [delivered?  (promise)
-        dispatcher  (#'core/event-dispatcher #(deliver delivered? %))
+  (let [received-event (promise)
+        dispatcher     (#'core/event-dispatcher #(deliver received-event %))
         latest-event (atom {:event ::core/polling-started})
         handle      (debezium_embedded.core.CaptureHandle.
                       (reify java.io.Closeable
@@ -156,7 +156,7 @@
               ::core/observation {:event                        ::core/shutdown-unconfirmed
                                   :cognitect.anomalies/category :cognitect.anomalies/unavailable
                                   :cognitect.anomalies/message  "Engine shutdown remained unconfirmed"}}
-             (deref delivered? 1000 nil)))
+             (deref received-event 1000 nil)))
       (is (= {:event ::core/polling-started} (core/latest-event handle)))
       (finally
         ((:shutdown dispatcher))))))
@@ -188,26 +188,26 @@
     (is (empty? @acknowledgements))))
 
 (deftest consumer-success-is-acknowledged-after-it-returns
-  (let [events           (atom [])
+  (let [steps            (atom [])
         committer        (reify io.debezium.engine.DebeziumEngine$RecordCommitter
                            (markProcessed [_ _])
-                           (markBatchFinished [_] (swap! events conj :acknowledged))
+                           (markBatchFinished [_] (swap! steps conj :acknowledged))
                            (markProcessed [_ _ _])
                            (buildOffsets [_] nil))
         consumer         (#'core/batch-consumer nil
-                           (fn [_] (swap! events conj :consumed)))]
+                           (fn [_] (swap! steps conj :consumed)))]
     (.handleBatch consumer [] committer)
-    (is (= [:consumed :acknowledged] @events))))
+    (is (= [:consumed :acknowledged] @steps))))
 
-(deftest event-hook-receives-observations-asynchronously
-  (let [delivered? (promise)
+(deftest event-hook-receives-events-asynchronously
+  (let [received-event (promise)
         dispatcher (#'core/event-dispatcher
                      (fn [event]
-                       (deliver delivered? event)))]
+                       (deliver received-event event)))]
     (try
       ((:emit dispatcher) {:event ::core/polling-started})
       (is (= {::core/event       ::core/event-observed
               ::core/observation {:event ::core/polling-started}}
-             (deref delivered? 1000 nil)))
+             (deref received-event 1000 nil)))
       (finally
         ((:shutdown dispatcher))))))

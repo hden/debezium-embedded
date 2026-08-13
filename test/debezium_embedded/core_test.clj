@@ -208,6 +208,31 @@
       (finally
         (remove-watch (.-stop-requested? handle) ::stop-requested)))))
 
+(deftest stop-closes-when-polling-started-unblocks-its-wait
+  (let [completion   (promise)
+        close-count  (atom 0)
+        latest-event (atom {:event ::core/polling-started})
+        engine       (reify java.io.Closeable
+                       (close [_]
+                         (swap! close-count inc)
+                         (deliver completion {:event ::core/completed
+                                              :success? true})))
+        handle       (capture-handle engine latest-event completion)
+        stop-requested (promise)]
+    (reset! (.-started? handle) true)
+    (add-watch (.-stop-requested? handle) ::stop-requested
+               (fn [_ _ _ requested?]
+                 (when requested?
+                   (deliver stop-requested true))))
+    (try
+      (let [stopping (future (core/stop! handle {:timeout-ms 1000}))]
+        (is (true? (deref stop-requested 1000 false)))
+        (deliver (.-start-result handle) {:event ::core/polling-started})
+        (is (nil? (deref stopping 1000 ::timed-out)))
+        (is (= 1 @close-count)))
+      (finally
+        (remove-watch (.-stop-requested? handle) ::stop-requested)))))
+
 (deftest stop-during-startup-applies-its-timeout-after-polling-starts
   (let [completion   (promise)
         latest-event (atom nil)

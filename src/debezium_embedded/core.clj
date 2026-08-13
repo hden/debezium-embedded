@@ -226,7 +226,10 @@
         (if-not (realized? start-result)
           (let [event @start-result]
             (if (= ::polling-started (:event event))
-              (await-completion handle timeout-ms)
+              (do
+                (close-engine! (.-engine handle)
+                               (.-shutdown-issued? handle))
+                (await-completion handle timeout-ms))
               (start-anomaly event)))
           (do
             (when (polling? handle)

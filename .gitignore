@@ -51,5 +51,6 @@ Temporary Items
 
 # End of https://www.gitignore.io/api/macos,clojure
 .clj-kondo/
+.worktrees/
 /tla/states/
 /tla/EngineLifecycle_TTrace_*

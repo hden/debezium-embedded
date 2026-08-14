@@ -1,0 +1,16 @@
+#!/bin/sh
+
+set -eu
+
+threshold=${1:?"usage: check-crap-threshold THRESHOLD"}
+
+awk -v threshold="$threshold" '
+  /^CRAP Report$/ { in_report = 1; next }
+  !in_report { next }
+  /^=+$/ || /^Function[[:space:]]/ || /^-+$/ || /^[[:space:]]*$/ { next }
+  $NF ~ /^[0-9]+(\.[0-9]+)?$/ && $NF >= threshold {
+    print "CRAP threshold exceeded (" threshold "): " $0
+    failed = 1
+  }
+  END { exit failed ? 1 : 0 }
+'

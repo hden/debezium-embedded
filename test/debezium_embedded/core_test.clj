@@ -176,6 +176,55 @@
     (deliver (.-start-result handle) {:event ::core/polling-started})
     (is (nil? (core/stop! handle {:timeout-ms 100})))))
 
+(deftest stop-shuts-down-the-event-dispatcher
+  (let [event-thread (promise)
+        dispatcher   (#'core/event-dispatcher
+                       (fn [_]
+                         (deliver event-thread (Thread/currentThread))))
+        completion   (promise)
+        engine       (reify java.io.Closeable
+                       (close [_]
+                         (deliver completion {:event ::core/completed
+                                              :success? true})))
+        handle       (debezium_embedded.core.CaptureHandle.
+                       engine
+                       (atom {:event ::core/polling-started})
+                       (doto (promise) (deliver {:event ::core/polling-started}))
+                       completion
+                       dispatcher
+                       (atom true)
+                       (atom false)
+                       (atom false)
+                       100)]
+    (try
+      ((:emit dispatcher) {:event ::test-event})
+      (let [^Thread thread (deref event-thread 1000 ::timed-out)]
+        (is (instance? Thread thread))
+        (is (false? (.isDaemon thread)))
+        (is (nil? (core/stop! handle {})))
+        (.join thread 1000)
+        (is (false? (.isAlive thread))))
+      (finally
+        ((:shutdown dispatcher))))))
+
+(deftest stop-shuts-down-the-event-dispatcher-before-start-and-after-an-anomaly
+  (let [shutdown-count (atom 0)
+        dispatcher     {:shutdown #(swap! shutdown-count inc)}
+        before-start   (debezium_embedded.core.CaptureHandle.
+                         nil (atom nil) (promise) (promise) dispatcher
+                         (atom false) (atom false) (atom false) 100)
+        failure        {:event                        ::core/completed
+                        :success?                     false
+                        :cognitect.anomalies/category :cognitect.anomalies/fault
+                        :cognitect.anomalies/message  "connector failed"}
+        after-anomaly  (debezium_embedded.core.CaptureHandle.
+                         nil (atom failure) (promise) (doto (promise) (deliver failure)) dispatcher
+                         (atom true) (atom false) (atom false) 100)]
+    (is (nil? (core/stop! before-start {})))
+    (is (= 1 @shutdown-count))
+    (is (= (dissoc failure :event :success?) (core/stop! after-anomaly {})))
+    (is (= 2 @shutdown-count))))
+
 (deftest stop-during-startup-closes-after-polling-starts
   (let [completion   (promise)
         close-count  (atom 0)

@@ -17,8 +17,6 @@
   Closeable
   (close [this]
     (let [result (stop! this {})]
-      (when-let [shutdown (:shutdown (.-event-dispatcher this))]
-        (shutdown))
       (when result
         (throw (ex-info "Unable to stop Debezium capture" result))))))
 
@@ -82,6 +80,10 @@
 (defn- emit! [emit event]
   (when emit
     (emit event)))
+
+(defn- shutdown-event-dispatcher! [^CaptureHandle handle]
+  (when-let [shutdown (:shutdown (.-event-dispatcher handle))]
+    (shutdown)))
 
 (defn- observe-callback! [latest-event emit event]
   (reset! latest-event event)
@@ -217,26 +219,29 @@
   (let [completion (.-completion handle)
         start-result (.-start-result handle)
         timeout-ms (or timeout-ms (.-default-shutdown-timeout-ms handle))]
-    (cond
-      (not @(.-started? handle)) nil
-      (realized? completion) (completion-anomaly @completion)
-      :else
-      (try
-        (reset! (.-stop-requested? handle) true)
-        (if-not (realized? start-result)
-          (let [event @start-result]
-            (if (= ::polling-started (:event event))
-              (do
+    (try
+      (cond
+        (not @(.-started? handle)) nil
+        (realized? completion) (completion-anomaly @completion)
+        :else
+        (try
+          (reset! (.-stop-requested? handle) true)
+          (if-not (realized? start-result)
+            (let [event @start-result]
+              (if (= ::polling-started (:event event))
+                (do
+                  (close-engine! (.-engine handle)
+                                 (.-shutdown-issued? handle))
+                  (await-completion handle timeout-ms))
+                (start-anomaly event)))
+            (do
+              (when (polling? handle)
                 (close-engine! (.-engine handle)
-                               (.-shutdown-issued? handle))
-                (await-completion handle timeout-ms))
-              (start-anomaly event)))
-          (do
-            (when (polling? handle)
-              (close-engine! (.-engine handle)
-                             (.-shutdown-issued? handle)))
-            (await-completion handle timeout-ms)))
-        (catch Throwable cause
-          (let [event (fault ::shutdown-failed "Engine shutdown failed" cause)]
-            (emit! (:emit (.-event-dispatcher handle)) event)
-            (dissoc event :event)))))))
+                               (.-shutdown-issued? handle)))
+              (await-completion handle timeout-ms)))
+          (catch Throwable cause
+            (let [event (fault ::shutdown-failed "Engine shutdown failed" cause)]
+              (emit! (:emit (.-event-dispatcher handle)) event)
+              (dissoc event :event)))))
+      (finally
+        (shutdown-event-dispatcher! handle)))))

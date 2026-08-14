@@ -6,7 +6,7 @@ coverage:
 crap: coverage
 	@report=$$(mktemp); \
 	trap 'rm -f "$$report"' EXIT; \
-	if ! clj -M:crap --use-existing-coverage --lcov target/coverage/lcov.info --source-root src > "$$report"; then \
+	if ! clojure -M:crap --use-existing-coverage --lcov target/coverage/lcov.info --source-root src > "$$report"; then \
 	  cat "$$report"; \
 	  exit 1; \
 	fi; \

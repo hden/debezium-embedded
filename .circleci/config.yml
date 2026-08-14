@@ -16,11 +16,14 @@ jobs:
       - checkout
       - restore_cache:
           keys:
-            - v1-dependencies-{{ checksum "project.clj" }}
-            - v1-dependencies-
+            - v2-dependencies-{{ checksum "project.clj" }}-{{ checksum "deps.edn" }}
+            - v2-dependencies-{{ checksum "project.clj" }}-
       - run: lein deps
+      - run: lein test
+      - run: make quality
       - save_cache:
           paths:
             - ~/.m2
-          key: v1-dependencies-{{ checksum "project.clj" }}
-      - run: lein test
+            - ~/.gitlibs
+            - ~/.clojure/.cpcache
+          key: v2-dependencies-{{ checksum "project.clj" }}-{{ checksum "deps.edn" }}

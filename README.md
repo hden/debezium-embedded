@@ -145,6 +145,35 @@ Each record has the following structure:
 lein test
 ```
 
+### Coverage and CRAP
+
+```bash
+make coverage # Generate Cloverage HTML and LCOV reports.
+make crap     # Generate coverage, print a CRAP report, and enforce CRAP < 30.
+make quality  # Run the shared local and CI quality gate.
+```
+
+The quality gate fails when a function's CRAP score is 30 or higher. Coverage
+reports are written to `target/coverage/`.
+
+To enable the versioned pre-push hook, run this once in your clone:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+The hook runs `make quality` and prevents the push when it fails.
+
+### Publishing to Clojars
+
+```bash
+make deploy
+```
+
+This runs the quality gate and then uses the existing Leiningen publishing
+workflow: `lein deploy clojars`. Configure Clojars credentials in your local
+Leiningen profile; do not store them in this repository.
+
 ### Starting REPL
 
 ```bash

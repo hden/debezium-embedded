@@ -10,5 +10,5 @@
   :profiles {:dev {:global-vars {*warn-on-reflection* true}
                    :dependencies [[funcool/promesa "12.0.1"]
                                   ;; [org.slf4j/slf4j-simple "2.0.18"]
-                                  [io.debezium/debezium-connector-postgres "3.6.1.Final"]]}}
+                                  [io.debezium/debezium-connector-postgres "3.6.2.Final"]]}}
   :repl-options {:init-ns debezium-embedded.core})

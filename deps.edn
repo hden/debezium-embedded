@@ -1,5 +1,5 @@
 {:aliases
  {:crap {:extra-deps {io.github.unclebob/crap4clj
                       {:git/url "https://github.com/unclebob/crap4clj"
-                       :git/sha "1ee5b8cf1b3fd0dbb62c5308f3e2de528b80d077"}}
+                       :git/sha "e90be2e7aa02c2ec5d6544e9cecddc6b73ad3e4d"}}
          :main-opts ["-m" "crap4clj.core"]}}}
